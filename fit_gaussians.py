@@ -270,25 +270,35 @@ def compute_alignment(
     cal_scale: float | None = None,
     anchor_k: int = 0,
     scale_ref_m: int | None = None,
+    anchor_k_tweezer: int | None = None,
+    scale_ref_m_tweezer: int | None = None,
 ) -> dict:
     """Compute δ parameters (shift + linear scale) to add to the left array to overlap with right.
 
-    Peaks are sorted top-to-bottom (smallest image row = index 0).
+    Peaks are sorted top-to-bottom (smallest image row = detected-pair index 0).
 
-    anchor_k    : index of the peak whose left↔right offset defines the shift.
-                  Correction is zero at this peak: (n − k) = 0 when n = k.
-    scale_ref_m : index of the second peak used to set the scale a.
-                  Defaults to the last (bottom-most) peak when None.
+    anchor_k           : detected-pair index (0 = topmost) of the anchor peak.
+                         Correction is exactly zero at this peak.
+    scale_ref_m        : detected-pair index of the scale-reference peak.
+                         Defaults to the last (bottom-most) detected pair.
+    anchor_k_tweezer   : actual tweezer number of the anchor peak in the full array.
+                         Defaults to anchor_k if not given.
+    scale_ref_m_tweezer: actual tweezer number of the scale-reference peak.
+                         Defaults to scale_ref_m if not given.
 
-    Model: left_y'[n] + shift_y + (n − anchor_k) · a = right_y'[n]
+    Model (in tweezer space):
+        left_y'[t] + shift_y + (t − t_k) · a = right_y'[t]
+    where t is the tweezer index, t_k is anchor_k_tweezer, and a is in units/tweezer.
 
     Returns a dict with keys:
-      shift_x_rot, shift_y_rot  – offset at peak k in rotated x'/y' frame (add to left)
-      scale_a                   – linear correction per peak index step in y'
-      units                     – 'MHz' if cal_scale provided, else 'px'
-      n_pairs                   – number of matched pairs
-      anchor_k, scale_ref_m     – the indices actually used (clamped to valid range)
-      axis_vector               – (dx, dy) unit vector used as y' axis
+      shift_x_rot, shift_y_rot     – offset at anchor in rotated x'/y' frame (add to left)
+      scale_a                      – linear correction per tweezer step in y'
+      units                        – 'MHz' if cal_scale provided, else 'px'
+      n_pairs                      – number of matched detected pairs
+      anchor_k, scale_ref_m        – detected-pair indices actually used (clamped)
+      anchor_k_tweezer             – tweezer index of anchor
+      scale_ref_m_tweezer          – tweezer index of scale ref
+      axis_vector                  – (dx, dy) unit vector used as y' axis
     """
     left_sorted  = sorted(left_fits,  key=lambda f: f["row"])
     right_sorted = sorted(right_fits, key=lambda f: f["row"])
@@ -321,34 +331,40 @@ def compute_alignment(
         for l, r in zip(left_sorted[:n], right_sorted[:n])
     ]
 
-    # Clamp k and m to valid range
+    # Clamp detected-pair indices to valid range
     k = max(0, min(anchor_k, n - 1))
     m = max(0, min(scale_ref_m if scale_ref_m is not None else n - 1, n - 1))
+
+    # Tweezer indices default to detected-pair indices if not supplied
+    k_tw = anchor_k_tweezer    if anchor_k_tweezer    is not None else k
+    m_tw = scale_ref_m_tweezer if scale_ref_m_tweezer is not None else m
 
     dx_k, dy_k = pairs[k]
     _,    dy_m = pairs[m]
 
-    # shift: add to left to reach right at peak k
+    # shift: what to add to left image at anchor peak to reach right
     shift_x = -dx_k
-    shift_y = -dy_k          # = right_y'[k] − left_y'[k]
+    shift_y = -dy_k          # = right_y'[t_k] − left_y'[t_k]
 
-    # scale: derived from second reference peak m
-    # left_y'[m] + shift_y + (m − k)·a = right_y'[m]
-    # => (m − k)·a = −dy_m − shift_y = dy_k − dy_m
-    a = (dy_k - dy_m) / (m - k) if m != k else 0.0
+    # scale: derived from anchor + scale-reference peak, denominator in TWEEZER steps
+    # left_y'[t_m] + shift_y + (t_m − t_k)·a = right_y'[t_m]
+    # => a = (dy_k − dy_m) / (t_m − t_k)
+    a = (dy_k - dy_m) / (m_tw - k_tw) if m_tw != k_tw else 0.0
 
     scale = cal_scale if cal_scale is not None else 1.0
     units = "MHz" if cal_scale is not None else "px"
 
     return {
-        "shift_x_rot": shift_x * scale,
-        "shift_y_rot": shift_y * scale,
-        "scale_a":     a * scale,
-        "units":       units,
-        "n_pairs":     n,
-        "anchor_k":    k,
-        "scale_ref_m": m,
-        "axis_vector": u_y.tolist(),
+        "shift_x_rot":        shift_x * scale,
+        "shift_y_rot":        shift_y * scale,
+        "scale_a":            a * scale,
+        "units":              units,
+        "n_pairs":            n,
+        "anchor_k":           k,
+        "scale_ref_m":        m,
+        "anchor_k_tweezer":   k_tw,
+        "scale_ref_m_tweezer": m_tw,
+        "axis_vector":        u_y.tolist(),
     }
 
 
@@ -447,9 +463,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "Index of the anchor peak for the shift (default: 0 = topmost peak). "
-            "Peaks are sorted top-to-bottom, so 0 is the highest in the image, "
-            "1 is the next one down, etc. The correction (n−k)·a is zero at this peak."
+            "Detected-pair index of the anchor peak (default: 0 = topmost detected peak). "
+            "Peaks sorted top-to-bottom: 0 is highest in image, 1 is next down, etc. "
+            "Zero correction is applied at this peak."
         ),
     )
     parser.add_argument(
@@ -457,9 +473,27 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Index of the scale-reference peak (default: last/bottom-most peak). "
-            "Same top-to-bottom ordering as --anchor-k. "
-            "Together with --anchor-k this pins the linear scale a."
+            "Detected-pair index of the scale-reference peak (default: last/bottommost). "
+            "Same top-to-bottom ordering as --anchor-k."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-k-tweezer",
+        type=int,
+        default=None,
+        help=(
+            "Tweezer index (in the full array) of the anchor peak. "
+            "Defaults to --anchor-k if not given. "
+            "The scale a is computed per tweezer step using this and --scale-ref-m-tweezer."
+        ),
+    )
+    parser.add_argument(
+        "--scale-ref-m-tweezer",
+        type=int,
+        default=None,
+        help=(
+            "Tweezer index (in the full array) of the scale-reference peak. "
+            "Defaults to --scale-ref-m if not given."
         ),
     )
     return parser.parse_args()
@@ -491,6 +525,8 @@ def _print_alignment(
     cal_dist: float | None,
     anchor_k: int = 0,
     scale_ref_m: int | None = None,
+    anchor_k_tweezer: int | None = None,
+    scale_ref_m_tweezer: int | None = None,
 ) -> None:
     """Compute and print δ parameters; calibrates using top-two-peak spacing of right image."""
     right_sorted = sorted(right_fits, key=lambda f: f["row"])
@@ -501,18 +537,29 @@ def _print_alignment(
         if px_spacing > 1e-6:
             cal_scale = cal_dist / px_spacing
 
-    result = compute_alignment(left_fits, right_fits, cal_scale, anchor_k, scale_ref_m)
-    u  = result["units"]
-    k  = result["anchor_k"]
-    m  = result["scale_ref_m"]
-    n  = result["n_pairs"]
+    result = compute_alignment(
+        left_fits, right_fits, cal_scale,
+        anchor_k, scale_ref_m, anchor_k_tweezer, scale_ref_m_tweezer,
+    )
+    u    = result["units"]
+    k    = result["anchor_k"]
+    m    = result["scale_ref_m"]
+    k_tw = result["anchor_k_tweezer"]
+    m_tw = result["scale_ref_m_tweezer"]
+    n    = result["n_pairs"]
     print(
-        f"δ (add to left array to overlap right)  [{n} peaks, indexed 0=topmost → {n-1}=bottommost]\n"
-        f"  Anchor k={k}  (shift reference — zero correction at this peak)\n"
-        f"  Scale  m={m}  (scale reference — pins linear term)\n"
-        f"  Δy' = {result['shift_y_rot']:+.6f} {u}   Δx' = {result['shift_x_rot']:+.6f} {u}\n"
-        f"  a   = {result['scale_a']:+.6f} {u}/peak\n"
-        f"  Formula: left_y'[n] + ({result['shift_y_rot']:+.6f}) + (n − {k})·({result['scale_a']:+.6f}) = right_y'[n]"
+        f"δ (add to left array to overlap right)\n"
+        f"  {n} detected pairs  |  pair indices: 0 = topmost → {n-1} = bottommost\n"
+        f"\n"
+        f"  Anchor   k = pair {k}, tweezer {k_tw}  (zero correction here)\n"
+        f"  Scale ref m = pair {m}, tweezer {m_tw}  (pins the scale)\n"
+        f"\n"
+        f"  Δy' = {result['shift_y_rot']:+.6f} {u}\n"
+        f"  Δx' = {result['shift_x_rot']:+.6f} {u}\n"
+        f"  a   = {result['scale_a']:+.6f} {u}/tweezer\n"
+        f"\n"
+        f"  left_y'[t] + ({result['shift_y_rot']:+.6f}) + (t − {k_tw})·({result['scale_a']:+.6f}) = right_y'[t]\n"
+        f"  where t = tweezer index"
     )
     if cal_dist is not None and cal_scale is None:
         print("  Warning: calibration requires at least 2 peaks in the right image.")
@@ -539,7 +586,11 @@ def main() -> None:
         for f in right_fits: f["image"] = args.right.name
         write_results(args.output, left_fits + right_fits)
         print(f"Fitted {len(left_fits)} left + {len(right_fits)} right peaks. Results written to {args.output}.")
-        _print_alignment(left_fits, right_fits, args.cal_dist, args.anchor_k, args.scale_ref_m)
+        _print_alignment(
+            left_fits, right_fits, args.cal_dist,
+            args.anchor_k, args.scale_ref_m,
+            args.anchor_k_tweezer, args.scale_ref_m_tweezer,
+        )
         annotated_dir = None if args.no_annotated else args.annotated_dir
         if annotated_dir is not None:
             annotated_dir.mkdir(parents=True, exist_ok=True)

@@ -40,11 +40,16 @@ class GaussianFitApp(tk.Tk):
         self.distance_pairs: list[dict] = []
         self.calibration_distance_var = tk.StringVar(value="1")
         self.calibration_scale: float | None = None
-        self.number_tweezers_var = tk.StringVar(value="37")
-        # k = anchor peak (shift reference, zero correction here); m = scale-reference peak
-        # both indexed 0 = topmost fitted peak, counting downward
+        # Detected-pair indices (0 = topmost detected peak, counting downward)
         self.anchor_k_var = tk.StringVar(value="0")
         self.scale_ref_m_var = tk.StringVar(value="9")
+        # Corresponding tweezer indices in the full array (default = same as pair indices)
+        self.anchor_k_tweezer_var = tk.StringVar(value="0")
+        self.scale_ref_m_tweezer_var = tk.StringVar(value="9")
+        # StringVars for the big red result display
+        self.delta_values_var  = tk.StringVar(value="")
+        self.delta_formula_var = tk.StringVar(value="")
+        self.delta_info_var    = tk.StringVar(value="Fit both images to see δ results.")
         self.last_axis_label = "dx/dy"
         self.last_axis_key_x = "dx"
         self.last_axis_key_y = "dy"
@@ -82,8 +87,6 @@ class GaussianFitApp(tk.Tk):
         ttk.Label(button_frame, text="Cal dist (MHz):").pack(side=tk.LEFT, padx=(12, 2))
         ttk.Entry(button_frame, width=7, textvariable=self.calibration_distance_var).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="Calibrate", command=self._calibrate).pack(side=tk.LEFT, padx=4)
-        ttk.Label(button_frame, text="Number of Tweezers:").pack(side=tk.LEFT, padx=(12, 2))
-        ttk.Entry(button_frame, width=5, textvariable=self.number_tweezers_var).pack(side=tk.LEFT, padx=(0, 12))
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -134,48 +137,73 @@ class GaussianFitApp(tk.Tk):
 
         ttk.Label(results_tab, textvariable=self.results_status_var).pack(fill=tk.X, padx=4, pady=2)
 
-        # ── δ alignment reference controls ──────────────────────────────────────
-        # Peaks are always sorted top-to-bottom (0 = highest in image, N-1 = lowest).
+        # ── δ alignment reference inputs ─────────────────────────────────────────
+        # All peak indices count from 0 = topmost detected peak, downward.
         align_frame = ttk.LabelFrame(
             results_tab,
-            text="δ alignment references  (peaks sorted top→bottom, 0 = topmost)",
+            text="δ alignment references  —  all indices: 0 = topmost detected peak, counting downward",
         )
-        align_frame.pack(fill=tk.X, padx=4, pady=2)
+        align_frame.pack(fill=tk.X, padx=4, pady=4)
 
-        k_frame = ttk.Frame(align_frame)
-        k_frame.pack(side=tk.LEFT, padx=8, pady=4)
+        # ── k (anchor) ──────────────────────────────
+        k_outer = ttk.LabelFrame(align_frame, text="k  —  ANCHOR  (zero correction at this peak)")
+        k_outer.pack(side=tk.LEFT, padx=10, pady=6, fill=tk.Y)
+        ttk.Label(k_outer, text="Detected-pair index\n(0 = topmost)").pack(pady=(4, 0))
+        ttk.Entry(k_outer, width=6, textvariable=self.anchor_k_var).pack(pady=2)
+        ttk.Label(k_outer, text="Tweezer index\n(in full array)").pack(pady=(6, 0))
+        ttk.Entry(k_outer, width=6, textvariable=self.anchor_k_tweezer_var).pack(pady=2)
+
+        ttk.Separator(align_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=8)
+
+        # ── m (scale ref) ───────────────────────────
+        m_outer = ttk.LabelFrame(align_frame, text="m  —  SCALE REFERENCE  (pins the scale a)")
+        m_outer.pack(side=tk.LEFT, padx=10, pady=6, fill=tk.Y)
+        ttk.Label(m_outer, text="Detected-pair index\n(0 = topmost)").pack(pady=(4, 0))
+        ttk.Entry(m_outer, width=6, textvariable=self.scale_ref_m_var).pack(pady=2)
+        ttk.Label(m_outer, text="Tweezer index\n(in full array)").pack(pady=(6, 0))
+        ttk.Entry(m_outer, width=6, textvariable=self.scale_ref_m_tweezer_var).pack(pady=2)
+
+        ttk.Separator(align_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=8)
+
+        right_side = ttk.Frame(align_frame)
+        right_side.pack(side=tk.LEFT, padx=8, pady=6, fill=tk.BOTH, expand=True)
         ttk.Label(
-            k_frame,
-            text="k  —  anchor peak\n(zero correction here)",
-            justify=tk.CENTER,
-        ).pack()
-        ttk.Entry(k_frame, width=5, textvariable=self.anchor_k_var).pack()
-
-        ttk.Separator(align_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
-
-        m_frame = ttk.Frame(align_frame)
-        m_frame.pack(side=tk.LEFT, padx=8, pady=4)
-        ttk.Label(
-            m_frame,
-            text="m  —  scale-reference peak\n(pins the linear scale a)",
-            justify=tk.CENTER,
-        ).pack()
-        ttk.Entry(m_frame, width=5, textvariable=self.scale_ref_m_var).pack()
-
-        ttk.Separator(align_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
-
-        ttk.Label(
-            align_frame,
-            text="Model:  left_y'[n]  +  Δy'  +  (n − k) · a  =  right_y'[n]",
-            font=("TkFixedFont",),
-        ).pack(side=tk.LEFT, padx=8)
-
-        ttk.Button(align_frame, text="Recalculate δ", command=self._update_results).pack(
-            side=tk.RIGHT, padx=8, pady=4
+            right_side,
+            text="Model (t = tweezer index):\nleft_y'[t]  +  Δy'  +  (t − t_k) · a  =  right_y'[t]",
+            font=("TkFixedFont", 10),
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+        ttk.Button(right_side, text="Recalculate δ", command=self._update_results).pack(
+            anchor=tk.W, pady=(8, 0)
         )
         # ────────────────────────────────────────────────────────────────────────
 
-        ttk.Label(results_tab, textvariable=self.shift_info_var).pack(fill=tk.X, padx=4, pady=2)
+        # ── big red δ results display ────────────────────────────────────────────
+        BIG_RED  = ("TkFixedFont", 14, "bold")
+        INFO_FONT = ("TkDefaultFont", 10)
+        delta_frame = ttk.LabelFrame(results_tab, text="δ results  (add these to the left array to overlap right)")
+        delta_frame.pack(fill=tk.X, padx=4, pady=4)
+
+        tk.Label(
+            delta_frame, textvariable=self.delta_values_var,
+            font=BIG_RED, fg="red", justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, padx=12, pady=(8, 4))
+
+        ttk.Separator(delta_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8)
+
+        tk.Label(
+            delta_frame, textvariable=self.delta_formula_var,
+            font=BIG_RED, fg="red", justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, padx=12, pady=(4, 8))
+
+        ttk.Separator(delta_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8)
+
+        tk.Label(
+            delta_frame, textvariable=self.delta_info_var,
+            font=INFO_FONT, fg="gray40", justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, padx=12, pady=(4, 6))
+        # ────────────────────────────────────────────────────────────────────────
+
         result_button_frame = ttk.Frame(results_tab)
         result_button_frame.pack(fill=tk.X, padx=4, pady=4)
         ttk.Button(result_button_frame, text="Save distances CSV", command=self._save_results).pack(side=tk.LEFT)
@@ -410,28 +438,47 @@ class GaussianFitApp(tk.Tk):
             )
             self.results_status_var.set("No matched pairs available yet.")
 
-        shift_info = "δ will appear after fitting both images."
         if self.fits["left"] and self.fits["right"]:
             try:
-                k = int(self.anchor_k_var.get())
-                m = int(self.scale_ref_m_var.get())
+                k    = int(self.anchor_k_var.get())
+                m    = int(self.scale_ref_m_var.get())
+                k_tw = int(self.anchor_k_tweezer_var.get())
+                m_tw = int(self.scale_ref_m_tweezer_var.get())
             except ValueError:
-                shift_info = "δ error: k and m must be integers."
-                self.shift_info_var.set(shift_info)
+                self.delta_values_var.set("Error: all four index fields must be integers.")
+                self.delta_formula_var.set("")
+                self.delta_info_var.set("")
                 self.canvas.draw()
                 return
-            al = compute_alignment(self.fits["left"], self.fits["right"], self.calibration_scale, k, m)
-            u  = al["units"]
-            k  = al["anchor_k"]     # clamped value actually used
-            m  = al["scale_ref_m"]  # clamped value actually used
-            n  = al["n_pairs"]
-            shift_info = (
-                f"δ (add to left to overlap right) — peaks 0=topmost, {n-1}=bottommost:\n"
-                f"  k={k} anchor (Δy'={al['shift_y_rot']:+.4f} {u}, Δx'={al['shift_x_rot']:+.4f} {u})   "
-                f"m={m} scale ref  →  a={al['scale_a']:+.6f} {u}/peak\n"
-                f"  left_y'[n]  +  ({al['shift_y_rot']:+.4f})  +  (n − {k}) · ({al['scale_a']:+.6f})  =  right_y'[n]"
+            al   = compute_alignment(
+                self.fits["left"], self.fits["right"], self.calibration_scale,
+                k, m, k_tw, m_tw,
             )
-        self.shift_info_var.set(shift_info)
+            u    = al["units"]
+            k    = al["anchor_k"]
+            m    = al["scale_ref_m"]
+            k_tw = al["anchor_k_tweezer"]
+            m_tw = al["scale_ref_m_tweezer"]
+            n    = al["n_pairs"]
+            self.delta_values_var.set(
+                f"  Δy'  =  {al['shift_y_rot']:+.6f}  {u}\n"
+                f"\n"
+                f"  Δx'  =  {al['shift_x_rot']:+.6f}  {u}\n"
+                f"\n"
+                f"  a    =  {al['scale_a']:+.6f}  {u} / tweezer"
+            )
+            self.delta_formula_var.set(
+                f"  left_y'[t]  +  ({al['shift_y_rot']:+.6f})  +  (t \u2212 {k_tw})\u00b7({al['scale_a']:+.6f})  =  right_y'[t]"
+            )
+            self.delta_info_var.set(
+                f"  {n} detected pairs  |  pair indices: 0 = topmost \u2192 {n-1} = bottommost  |  t = tweezer index\n"
+                f"  Anchor k: detected pair {k}, tweezer {k_tw}   \u2022   "
+                f"Scale ref m: detected pair {m}, tweezer {m_tw}"
+            )
+        else:
+            self.delta_values_var.set("")
+            self.delta_formula_var.set("")
+            self.delta_info_var.set("Fit both images to see δ results.")
         self.canvas.draw()
 
     def _save_results(self) -> None:
