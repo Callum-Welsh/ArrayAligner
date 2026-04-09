@@ -17,7 +17,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageTk
 
-from fit_gaussians import draw_crosses_on_image, ensure_2d, fit_image_array
+from fit_gaussians import compute_alignment, draw_crosses_on_image, ensure_2d, fit_image_array
 
 
 class GaussianFitApp(tk.Tk):
@@ -41,6 +41,10 @@ class GaussianFitApp(tk.Tk):
         self.calibration_distance_var = tk.StringVar(value="1")
         self.calibration_scale: float | None = None
         self.number_tweezers_var = tk.StringVar(value="37")
+        # k = anchor peak (shift reference, zero correction here); m = scale-reference peak
+        # both indexed 0 = topmost fitted peak, counting downward
+        self.anchor_k_var = tk.StringVar(value="0")
+        self.scale_ref_m_var = tk.StringVar(value="9")
         self.last_axis_label = "dx/dy"
         self.last_axis_key_x = "dx"
         self.last_axis_key_y = "dy"
@@ -129,6 +133,48 @@ class GaussianFitApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=4)
 
         ttk.Label(results_tab, textvariable=self.results_status_var).pack(fill=tk.X, padx=4, pady=2)
+
+        # ── δ alignment reference controls ──────────────────────────────────────
+        # Peaks are always sorted top-to-bottom (0 = highest in image, N-1 = lowest).
+        align_frame = ttk.LabelFrame(
+            results_tab,
+            text="δ alignment references  (peaks sorted top→bottom, 0 = topmost)",
+        )
+        align_frame.pack(fill=tk.X, padx=4, pady=2)
+
+        k_frame = ttk.Frame(align_frame)
+        k_frame.pack(side=tk.LEFT, padx=8, pady=4)
+        ttk.Label(
+            k_frame,
+            text="k  —  anchor peak\n(zero correction here)",
+            justify=tk.CENTER,
+        ).pack()
+        ttk.Entry(k_frame, width=5, textvariable=self.anchor_k_var).pack()
+
+        ttk.Separator(align_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
+
+        m_frame = ttk.Frame(align_frame)
+        m_frame.pack(side=tk.LEFT, padx=8, pady=4)
+        ttk.Label(
+            m_frame,
+            text="m  —  scale-reference peak\n(pins the linear scale a)",
+            justify=tk.CENTER,
+        ).pack()
+        ttk.Entry(m_frame, width=5, textvariable=self.scale_ref_m_var).pack()
+
+        ttk.Separator(align_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
+
+        ttk.Label(
+            align_frame,
+            text="Model:  left_y'[n]  +  Δy'  +  (n − k) · a  =  right_y'[n]",
+            font=("TkFixedFont",),
+        ).pack(side=tk.LEFT, padx=8)
+
+        ttk.Button(align_frame, text="Recalculate δ", command=self._update_results).pack(
+            side=tk.RIGHT, padx=8, pady=4
+        )
+        # ────────────────────────────────────────────────────────────────────────
+
         ttk.Label(results_tab, textvariable=self.shift_info_var).pack(fill=tk.X, padx=4, pady=2)
         result_button_frame = ttk.Frame(results_tab)
         result_button_frame.pack(fill=tk.X, padx=4, pady=4)
@@ -364,32 +410,26 @@ class GaussianFitApp(tk.Tk):
             )
             self.results_status_var.set("No matched pairs available yet.")
 
-        shift_info = "Shift info will appear after matching."
-        if pairs:
-            top = pairs[0]
-            if axis_vector_base is not None:
-                dx_top, dy_top = self._rotate_diff(top["dx"], top["dy"], axis_vector_base)
-                axis_hint = "x'/y'"
-            else:
-                dx_top = top["dx"]
-                dy_top = top["dy"]
-                axis_hint = "dx/dy"
-            shift_x = -dx_top
-            shift_y = -dy_top
-            shift_x_scaled = shift_x * scale
-            shift_y_scaled = shift_y * scale
+        shift_info = "δ will appear after fitting both images."
+        if self.fits["left"] and self.fits["right"]:
             try:
-                N = int(self.number_tweezers_var.get())
-                if N <= 0:
-                    raise ValueError
+                k = int(self.anchor_k_var.get())
+                m = int(self.scale_ref_m_var.get())
             except ValueError:
-                N = 37
-                self.number_tweezers_var.set(str(N))
-            a_value = shift_y_scaled / N
+                shift_info = "δ error: k and m must be integers."
+                self.shift_info_var.set(shift_info)
+                self.canvas.draw()
+                return
+            al = compute_alignment(self.fits["left"], self.fits["right"], self.calibration_scale, k, m)
+            u  = al["units"]
+            k  = al["anchor_k"]     # clamped value actually used
+            m  = al["scale_ref_m"]  # clamped value actually used
+            n  = al["n_pairs"]
             shift_info = (
-                f"Top-pair shift ({axis_hint}): x'={shift_x_scaled:.3f}{units}, "
-                f"y'={shift_y_scaled:.3f}{units}. Raw px shift: ({shift_x:.3f}, {shift_y:.3f}). "
-                f"Scale y''=y'+{a_value:.6f}·N ({N} tweezers)."
+                f"δ (add to left to overlap right) — peaks 0=topmost, {n-1}=bottommost:\n"
+                f"  k={k} anchor (Δy'={al['shift_y_rot']:+.4f} {u}, Δx'={al['shift_x_rot']:+.4f} {u})   "
+                f"m={m} scale ref  →  a={al['scale_a']:+.6f} {u}/peak\n"
+                f"  left_y'[n]  +  ({al['shift_y_rot']:+.4f})  +  (n − {k}) · ({al['scale_a']:+.6f})  =  right_y'[n]"
             )
         self.shift_info_var.set(shift_info)
         self.canvas.draw()

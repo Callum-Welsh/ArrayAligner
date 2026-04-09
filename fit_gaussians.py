@@ -264,6 +264,94 @@ def annotate_image(
     draw_crosses_on_image(image, fits).save(output_path)
 
 
+def compute_alignment(
+    left_fits: list[dict],
+    right_fits: list[dict],
+    cal_scale: float | None = None,
+    anchor_k: int = 0,
+    scale_ref_m: int | None = None,
+) -> dict:
+    """Compute δ parameters (shift + linear scale) to add to the left array to overlap with right.
+
+    Peaks are sorted top-to-bottom (smallest image row = index 0).
+
+    anchor_k    : index of the peak whose left↔right offset defines the shift.
+                  Correction is zero at this peak: (n − k) = 0 when n = k.
+    scale_ref_m : index of the second peak used to set the scale a.
+                  Defaults to the last (bottom-most) peak when None.
+
+    Model: left_y'[n] + shift_y + (n − anchor_k) · a = right_y'[n]
+
+    Returns a dict with keys:
+      shift_x_rot, shift_y_rot  – offset at peak k in rotated x'/y' frame (add to left)
+      scale_a                   – linear correction per peak index step in y'
+      units                     – 'MHz' if cal_scale provided, else 'px'
+      n_pairs                   – number of matched pairs
+      anchor_k, scale_ref_m     – the indices actually used (clamped to valid range)
+      axis_vector               – (dx, dy) unit vector used as y' axis
+    """
+    left_sorted  = sorted(left_fits,  key=lambda f: f["row"])
+    right_sorted = sorted(right_fits, key=lambda f: f["row"])
+    n = min(len(left_sorted), len(right_sorted))
+
+    # Build rotation axis: average direction from first→last peak in each image
+    vectors = []
+    for fits in (left_sorted, right_sorted):
+        if len(fits) < 2:
+            continue
+        vec = np.array([fits[-1]["col"] - fits[0]["col"], fits[-1]["row"] - fits[0]["row"]], dtype=float)
+        norm = np.linalg.norm(vec)
+        if norm > 1e-6:
+            vectors.append(vec / norm)
+
+    if vectors:
+        u_y = np.mean(vectors, axis=0)
+        u_y /= np.linalg.norm(u_y)
+    else:
+        u_y = np.array([0.0, 1.0])
+    u_x = np.array([u_y[1], -u_y[0]], dtype=float)
+
+    def rot(dx: float, dy: float) -> tuple[float, float]:
+        d = np.array([dx, dy])
+        return float(d.dot(u_x)), float(d.dot(u_y))
+
+    # dy[i] = left_y'[i] - right_y'[i] for each matched pair (sorted top→bottom)
+    pairs = [
+        rot(l["col"] - r["col"], l["row"] - r["row"])
+        for l, r in zip(left_sorted[:n], right_sorted[:n])
+    ]
+
+    # Clamp k and m to valid range
+    k = max(0, min(anchor_k, n - 1))
+    m = max(0, min(scale_ref_m if scale_ref_m is not None else n - 1, n - 1))
+
+    dx_k, dy_k = pairs[k]
+    _,    dy_m = pairs[m]
+
+    # shift: add to left to reach right at peak k
+    shift_x = -dx_k
+    shift_y = -dy_k          # = right_y'[k] − left_y'[k]
+
+    # scale: derived from second reference peak m
+    # left_y'[m] + shift_y + (m − k)·a = right_y'[m]
+    # => (m − k)·a = −dy_m − shift_y = dy_k − dy_m
+    a = (dy_k - dy_m) / (m - k) if m != k else 0.0
+
+    scale = cal_scale if cal_scale is not None else 1.0
+    units = "MHz" if cal_scale is not None else "px"
+
+    return {
+        "shift_x_rot": shift_x * scale,
+        "shift_y_rot": shift_y * scale,
+        "scale_a":     a * scale,
+        "units":       units,
+        "n_pairs":     n,
+        "anchor_k":    k,
+        "scale_ref_m": m,
+        "axis_vector": u_y.tolist(),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="""Turn TIFFs into NumPy arrays, find bright local maxima, and fit each with an elliptical Gaussian."""
@@ -336,6 +424,44 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip writing annotated overlays even when --annotated-dir is set.",
     )
+    parser.add_argument(
+        "--left",
+        type=pathlib.Path,
+        default=None,
+        help="Left (interlace) TIFF for alignment comparison.",
+    )
+    parser.add_argument(
+        "--right",
+        type=pathlib.Path,
+        default=None,
+        help="Right (main) TIFF for alignment comparison.",
+    )
+    parser.add_argument(
+        "--cal-dist",
+        type=float,
+        default=None,
+        help="Calibration: MHz between the top two adjacent peaks of the right image.",
+    )
+    parser.add_argument(
+        "--anchor-k",
+        type=int,
+        default=0,
+        help=(
+            "Index of the anchor peak for the shift (default: 0 = topmost peak). "
+            "Peaks are sorted top-to-bottom, so 0 is the highest in the image, "
+            "1 is the next one down, etc. The correction (n−k)·a is zero at this peak."
+        ),
+    )
+    parser.add_argument(
+        "--scale-ref-m",
+        type=int,
+        default=None,
+        help=(
+            "Index of the scale-reference peak (default: last/bottom-most peak). "
+            "Same top-to-bottom ordering as --anchor-k. "
+            "Together with --anchor-k this pins the linear scale a."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -359,44 +485,89 @@ def write_results(path: pathlib.Path, records: Iterable[dict]) -> None:
             writer.writerow(record)
 
 
+def _print_alignment(
+    left_fits: list[dict],
+    right_fits: list[dict],
+    cal_dist: float | None,
+    anchor_k: int = 0,
+    scale_ref_m: int | None = None,
+) -> None:
+    """Compute and print δ parameters; calibrates using top-two-peak spacing of right image."""
+    right_sorted = sorted(right_fits, key=lambda f: f["row"])
+    cal_scale: float | None = None
+    if cal_dist is not None and len(right_sorted) >= 2:
+        r0, r1 = right_sorted[0], right_sorted[1]
+        px_spacing = float(np.hypot(r1["col"] - r0["col"], r1["row"] - r0["row"]))
+        if px_spacing > 1e-6:
+            cal_scale = cal_dist / px_spacing
+
+    result = compute_alignment(left_fits, right_fits, cal_scale, anchor_k, scale_ref_m)
+    u  = result["units"]
+    k  = result["anchor_k"]
+    m  = result["scale_ref_m"]
+    n  = result["n_pairs"]
+    print(
+        f"δ (add to left array to overlap right)  [{n} peaks, indexed 0=topmost → {n-1}=bottommost]\n"
+        f"  Anchor k={k}  (shift reference — zero correction at this peak)\n"
+        f"  Scale  m={m}  (scale reference — pins linear term)\n"
+        f"  Δy' = {result['shift_y_rot']:+.6f} {u}   Δx' = {result['shift_x_rot']:+.6f} {u}\n"
+        f"  a   = {result['scale_a']:+.6f} {u}/peak\n"
+        f"  Formula: left_y'[n] + ({result['shift_y_rot']:+.6f}) + (n − {k})·({result['scale_a']:+.6f}) = right_y'[n]"
+    )
+    if cal_dist is not None and cal_scale is None:
+        print("  Warning: calibration requires at least 2 peaks in the right image.")
+
+
 def main() -> None:
     args = parse_args()
+
+    fit_kwargs = dict(
+        patch_radius=args.patch,
+        min_distance=args.min_distance,
+        threshold_abs=args.threshold,
+        max_peaks=None if args.max_peaks is None or args.max_peaks <= 0 else args.max_peaks,
+        ftol=args.ftol,
+        xtol=args.xtol,
+        gtol=args.gtol,
+    )
+
+    # Comparison mode: --left and --right provided directly
+    if args.left is not None and args.right is not None:
+        left_fits,  left_img  = process_image(args.left,  **fit_kwargs)
+        right_fits, right_img = process_image(args.right, **fit_kwargs)
+        for f in left_fits:  f["image"] = args.left.name
+        for f in right_fits: f["image"] = args.right.name
+        write_results(args.output, left_fits + right_fits)
+        print(f"Fitted {len(left_fits)} left + {len(right_fits)} right peaks. Results written to {args.output}.")
+        _print_alignment(left_fits, right_fits, args.cal_dist, args.anchor_k, args.scale_ref_m)
+        annotated_dir = None if args.no_annotated else args.annotated_dir
+        if annotated_dir is not None:
+            annotated_dir.mkdir(parents=True, exist_ok=True)
+            for path, fits, img in ((args.left, left_fits, left_img), (args.right, right_fits, right_img)):
+                annotate_image(img, fits, annotated_dir / f"{path.stem}_annotated.png")
+        return
+
+    # Batch mode: process all TIFFs in --input directory
     tif_paths = sorted(args.input.glob("*.tif")) + sorted(args.input.glob("*.tiff"))
     if not tif_paths:
         raise SystemExit(f"No TIFF files found in {args.input}")
 
-    max_peaks = None if args.max_peaks is None or args.max_peaks <= 0 else args.max_peaks
     annotated_dir = None if args.no_annotated else args.annotated_dir
     if annotated_dir is not None:
         annotated_dir.mkdir(parents=True, exist_ok=True)
 
     all_results = []
     for tif in tif_paths:
-        results, image = process_image(
-            tif,
-            patch_radius=args.patch,
-            min_distance=args.min_distance,
-            threshold_abs=args.threshold,
-            max_peaks=max_peaks,
-            ftol=args.ftol,
-            xtol=args.xtol,
-            gtol=args.gtol,
-        )
+        results, image = process_image(tif, **fit_kwargs)
         all_results.extend(results)
         if annotated_dir is not None:
-            annotate_image(
-                image,
-                results,
-                annotated_dir / f"{tif.stem}_annotated.png",
-            )
+            annotate_image(image, results, annotated_dir / f"{tif.stem}_annotated.png")
 
     if not all_results:
         raise SystemExit("No peaks were fitted. Try lowering the threshold or adjusting --patch.")
 
     write_results(args.output, all_results)
-    print(
-        f"Fitted {len(all_results)} peaks from {len(tif_paths)} image(s). Results written to {args.output}."
-    )
+    print(f"Fitted {len(all_results)} peaks from {len(tif_paths)} image(s). Results written to {args.output}.")
 
 
 if __name__ == "__main__":
