@@ -325,7 +325,7 @@ def compute_alignment(
         d = np.array([dx, dy])
         return float(d.dot(u_x)), float(d.dot(u_y))
 
-    # dy[i] = left_y'[i] - right_y'[i] for each matched pair (sorted top→bottom)
+    # dy[i] = left_y'[i] - right_y'[i]  (positive → left is BELOW right)
     pairs = [
         rot(l["col"] - r["col"], l["row"] - r["row"])
         for l, r in zip(left_sorted[:n], right_sorted[:n])
@@ -342,14 +342,16 @@ def compute_alignment(
     dx_k, dy_k = pairs[k]
     _,    dy_m = pairs[m]
 
-    # shift: what to add to left image at anchor peak to reach right
-    shift_x = -dx_k
-    shift_y = -dy_k          # = right_y'[t_k] − left_y'[t_k]
-
-    # scale: derived from anchor + scale-reference peak, denominator in TWEEZER steps
-    # left_y'[t_m] + shift_y + (t_m − t_k)·a = right_y'[t_m]
-    # => a = (dy_k − dy_m) / (t_m − t_k)
-    a = (dy_k - dy_m) / (m_tw - k_tw) if m_tw != k_tw else 0.0
+    # δ = what to add to the RIGHT array to overlap the left.
+    # Coordinate convention: negative y' = up (toward top of image), positive y' = down.
+    # Positive a expands the right array; negative a contracts it.
+    #
+    # Model: right_y'[t] + shift_y + (t − t_k)·a = left_y'[t]
+    # At t = t_k:  shift_y = left_y'[t_k] − right_y'[t_k] = dy_k
+    # At t = t_m:  a = (dy_m − dy_k) / (t_m − t_k)
+    shift_x = dx_k    # left_x' − right_x' at anchor
+    shift_y = dy_k    # left_y' − right_y' at anchor  (negative → right must move up)
+    a = (dy_m - dy_k) / (m_tw - k_tw) if m_tw != k_tw else 0.0
 
     scale = cal_scale if cal_scale is not None else 1.0
     units = "MHz" if cal_scale is not None else "px"
@@ -548,8 +550,10 @@ def _print_alignment(
     m_tw = result["scale_ref_m_tweezer"]
     n    = result["n_pairs"]
     print(
-        f"δ (add to left array to overlap right)\n"
+        f"δ (add to RIGHT array to overlap left)\n"
         f"  {n} detected pairs  |  pair indices: 0 = topmost → {n-1} = bottommost\n"
+        f"  y' convention: negative = up (toward top of image), positive = down\n"
+        f"  scale convention: positive a expands right array, negative a contracts it\n"
         f"\n"
         f"  Anchor   k = pair {k}, tweezer {k_tw}  (zero correction here)\n"
         f"  Scale ref m = pair {m}, tweezer {m_tw}  (pins the scale)\n"
@@ -558,7 +562,7 @@ def _print_alignment(
         f"  Δx' = {result['shift_x_rot']:+.6f} {u}\n"
         f"  a   = {result['scale_a']:+.6f} {u}/tweezer\n"
         f"\n"
-        f"  left_y'[t] + ({result['shift_y_rot']:+.6f}) + (t − {k_tw})·({result['scale_a']:+.6f}) = right_y'[t]\n"
+        f"  right_y'[t] + ({result['shift_y_rot']:+.6f}) + (t − {k_tw})·({result['scale_a']:+.6f}) = left_y'[t]\n"
         f"  where t = tweezer index"
     )
     if cal_dist is not None and cal_scale is None:

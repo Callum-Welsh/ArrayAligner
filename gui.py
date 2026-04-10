@@ -169,7 +169,14 @@ class GaussianFitApp(tk.Tk):
         right_side.pack(side=tk.LEFT, padx=8, pady=6, fill=tk.BOTH, expand=True)
         ttk.Label(
             right_side,
-            text="Model (t = tweezer index):\nleft_y'[t]  +  Δy'  +  (t − t_k) · a  =  right_y'[t]",
+            text=(
+                "Model (t = tweezer index):\n"
+                "right_y'[t]  +  Δy'  +  (t − t_k) · a  =  left_y'[t]\n"
+                "\n"
+                "negative y' = up    positive y' = down\n"
+                "positive a = expand right array\n"
+                "negative a = contract right array"
+            ),
             font=("TkFixedFont", 10),
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
@@ -181,7 +188,7 @@ class GaussianFitApp(tk.Tk):
         # ── big red δ results display ────────────────────────────────────────────
         BIG_RED  = ("TkFixedFont", 14, "bold")
         INFO_FONT = ("TkDefaultFont", 10)
-        delta_frame = ttk.LabelFrame(results_tab, text="δ results  (add these to the left array to overlap right)")
+        delta_frame = ttk.LabelFrame(results_tab, text="δ results  (add these to the RIGHT array to overlap left)")
         delta_frame.pack(fill=tk.X, padx=4, pady=4)
 
         tk.Label(
@@ -468,12 +475,12 @@ class GaussianFitApp(tk.Tk):
                 f"  a    =  {al['scale_a']:+.6f}  {u} / tweezer"
             )
             self.delta_formula_var.set(
-                f"  left_y'[t]  +  ({al['shift_y_rot']:+.6f})  +  (t \u2212 {k_tw})\u00b7({al['scale_a']:+.6f})  =  right_y'[t]"
+                f"  right_y'[t]  +  ({al['shift_y_rot']:+.6f})  +  (t \u2212 {k_tw})\u00b7({al['scale_a']:+.6f})  =  left_y'[t]"
             )
             self.delta_info_var.set(
-                f"  {n} detected pairs  |  pair indices: 0 = topmost \u2192 {n-1} = bottommost  |  t = tweezer index\n"
-                f"  Anchor k: detected pair {k}, tweezer {k_tw}   \u2022   "
-                f"Scale ref m: detected pair {m}, tweezer {m_tw}"
+                f"  {n} detected pairs  |  0 = topmost \u2192 {n-1} = bottommost  |  t = tweezer index\n"
+                f"  negative y' = up, positive y' = down  |  positive a = expand right array\n"
+                f"  Anchor k: pair {k}, tweezer {k_tw}   \u2022   Scale ref m: pair {m}, tweezer {m_tw}"
             )
         else:
             self.delta_values_var.set("")
