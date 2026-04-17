@@ -755,12 +755,12 @@ class GaussianFitApp(tk.Tk):
             return (a - mn) / (mx - mn) if mx > mn + 1e-9 else np.zeros_like(a)
 
         n_rows = len(pairs)
-        row_height_in = 2.2
-        fig = Figure(figsize=(9.5, n_rows * row_height_in))
+        row_height_in = 4.5
+        fig = Figure(figsize=(13.0, n_rows * row_height_in))
         gs = fig.add_gridspec(
             n_rows, 4,
-            width_ratios=[1.1, 2, 2, 2],
-            hspace=0.6, wspace=0.25,
+            width_ratios=[0.7, 2, 2, 2],
+            hspace=0.35, wspace=0.15,
             left=0.02, right=0.98, top=0.98, bottom=0.02,
         )
 
