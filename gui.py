@@ -17,7 +17,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageTk
 
-from fit_gaussians import compute_alignment, draw_crosses_on_image, ensure_2d, fit_image_array
+from fit_gaussians import compute_alignment, draw_crosses_on_image, elliptical_gaussian, ensure_2d, fit_image_array
 
 
 class GaussianFitApp(tk.Tk):
@@ -57,6 +57,14 @@ class GaussianFitApp(tk.Tk):
         self.ax_euclid = self.figure.add_subplot(2, 1, 1)
         self.ax_dxdy = self.figure.add_subplot(2, 1, 2)
         self.canvas: FigureCanvasTkAgg | None = None
+        self.fit_tk_canvas: tk.Canvas | None = None
+        self.fit_inner_frame: ttk.Frame | None = None
+        self._fit_window_id: int | None = None
+        self._fit_mpl_canvas: FigureCanvasTkAgg | None = None
+        self.overlap_tk_canvas: tk.Canvas | None = None
+        self.overlap_inner_frame: ttk.Frame | None = None
+        self._overlap_window_id: int | None = None
+        self._overlap_mpl_canvas: FigureCanvasTkAgg | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -92,8 +100,92 @@ class GaussianFitApp(tk.Tk):
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         images_tab = ttk.Frame(notebook)
         results_tab = ttk.Frame(notebook)
+        fits_tab = ttk.Frame(notebook)
+        overlap_tab = ttk.Frame(notebook)
         notebook.add(images_tab, text="Images")
         notebook.add(results_tab, text="Results")
+        notebook.add(fits_tab, text="Fits & Residuals")
+        notebook.add(overlap_tab, text="Overlap")
+
+        # ── Overlap tab (scrollable, same pattern as Fits & Residuals) ───────
+        overlap_scroll_outer = ttk.Frame(overlap_tab)
+        overlap_scroll_outer.pack(fill=tk.BOTH, expand=True)
+        overlap_scroll_outer.columnconfigure(0, weight=1)
+        overlap_scroll_outer.rowconfigure(0, weight=1)
+
+        self.overlap_tk_canvas = tk.Canvas(overlap_scroll_outer, highlightthickness=0)
+        self.overlap_tk_canvas.grid(row=0, column=0, sticky="nsew")
+
+        overlap_vbar = ttk.Scrollbar(overlap_scroll_outer, orient=tk.VERTICAL,
+                                     command=self.overlap_tk_canvas.yview)
+        overlap_vbar.grid(row=0, column=1, sticky="ns")
+        self.overlap_tk_canvas.configure(yscrollcommand=overlap_vbar.set)
+
+        self.overlap_inner_frame = ttk.Frame(self.overlap_tk_canvas)
+        self._overlap_window_id = self.overlap_tk_canvas.create_window(
+            (0, 0), window=self.overlap_inner_frame, anchor="nw"
+        )
+
+        def _on_overlap_inner_configure(event: tk.Event) -> None:
+            self.overlap_tk_canvas.configure(
+                scrollregion=self.overlap_tk_canvas.bbox("all")
+            )
+
+        def _on_overlap_canvas_resize(event: tk.Event) -> None:
+            if self._overlap_window_id is not None:
+                self.overlap_tk_canvas.itemconfig(
+                    self._overlap_window_id, width=event.width
+                )
+
+        def _on_overlap_mousewheel(event: tk.Event) -> None:
+            self.overlap_tk_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units"
+            )
+
+        self.overlap_inner_frame.bind("<Configure>", _on_overlap_inner_configure)
+        self.overlap_tk_canvas.bind("<Configure>", _on_overlap_canvas_resize)
+        self.overlap_tk_canvas.bind("<MouseWheel>", _on_overlap_mousewheel)
+        self.overlap_inner_frame.bind("<MouseWheel>", _on_overlap_mousewheel)
+
+        # ── Fits & Residuals tab ─────────────────────────────────────────────
+        fits_scroll_outer = ttk.Frame(fits_tab)
+        fits_scroll_outer.pack(fill=tk.BOTH, expand=True)
+        fits_scroll_outer.columnconfigure(0, weight=1)
+        fits_scroll_outer.rowconfigure(0, weight=1)
+
+        self.fit_tk_canvas = tk.Canvas(fits_scroll_outer, highlightthickness=0)
+        self.fit_tk_canvas.grid(row=0, column=0, sticky="nsew")
+
+        fits_vbar = ttk.Scrollbar(fits_scroll_outer, orient=tk.VERTICAL,
+                                  command=self.fit_tk_canvas.yview)
+        fits_vbar.grid(row=0, column=1, sticky="ns")
+        self.fit_tk_canvas.configure(yscrollcommand=fits_vbar.set)
+
+        self.fit_inner_frame = ttk.Frame(self.fit_tk_canvas)
+        self._fit_window_id = self.fit_tk_canvas.create_window(
+            (0, 0), window=self.fit_inner_frame, anchor="nw"
+        )
+
+        def _on_fit_inner_configure(event: tk.Event) -> None:
+            self.fit_tk_canvas.configure(
+                scrollregion=self.fit_tk_canvas.bbox("all")
+            )
+
+        def _on_fit_canvas_resize(event: tk.Event) -> None:
+            if self._fit_window_id is not None:
+                self.fit_tk_canvas.itemconfig(
+                    self._fit_window_id, width=event.width
+                )
+
+        def _on_fit_mousewheel(event: tk.Event) -> None:
+            self.fit_tk_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units"
+            )
+
+        self.fit_inner_frame.bind("<Configure>", _on_fit_inner_configure)
+        self.fit_tk_canvas.bind("<Configure>", _on_fit_canvas_resize)
+        self.fit_tk_canvas.bind("<MouseWheel>", _on_fit_mousewheel)
+        self.fit_inner_frame.bind("<MouseWheel>", _on_fit_mousewheel)
 
         display_frame = ttk.Frame(images_tab)
         display_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -290,6 +382,8 @@ class GaussianFitApp(tk.Tk):
             self._update_display(side)
         self._update_status()
         self._update_results()
+        self._update_fit_display()
+        self._update_overlap_display()
         total = len(self.fits["left"]) + len(self.fits["right"])
         messagebox.showinfo("Fit complete", f"Fitted {total} peaks total.")
 
@@ -487,6 +581,268 @@ class GaussianFitApp(tk.Tk):
             self.delta_formula_var.set("")
             self.delta_info_var.set("Fit both images to see δ results.")
         self.canvas.draw()
+
+    def _update_fit_display(self) -> None:
+        """Rebuild the Fits & Residuals tab with one row per fitted peak."""
+        if self.fit_inner_frame is None or self.fit_tk_canvas is None:
+            return
+
+        for widget in self.fit_inner_frame.winfo_children():
+            widget.destroy()
+        self._fit_mpl_canvas = None
+
+        left_fits  = sorted(self.fits["left"],  key=lambda f: f["row"])
+        right_fits = sorted(self.fits["right"], key=lambda f: f["row"])
+        all_items: list[tuple[str, int, dict]] = (
+            [("Left",  i, f) for i, f in enumerate(left_fits)]
+            + [("Right", i, f) for i, f in enumerate(right_fits)]
+        )
+
+        if not all_items:
+            ttk.Label(
+                self.fit_inner_frame,
+                text="Run Fit on both images to see individual peak fits and residuals.",
+                padding=20,
+            ).pack()
+            self.fit_tk_canvas.configure(scrollregion=self.fit_tk_canvas.bbox("all"))
+            return
+
+        try:
+            patch_radius = int(self.param_vars["patch"].get())
+        except ValueError:
+            patch_radius = 12
+
+        n_rows = len(all_items)
+        row_height_in = 2.2
+        # 4 columns: [coords | data | fit | residual]
+        # coords column is narrower than the image columns
+        fig = Figure(figsize=(9.5, n_rows * row_height_in))
+        gs = fig.add_gridspec(
+            n_rows, 4,
+            width_ratios=[1.1, 2, 2, 2],
+            hspace=0.6, wspace=0.25,
+            left=0.02, right=0.98, top=0.98, bottom=0.02,
+        )
+
+        for row_idx, (side, peak_idx, fit) in enumerate(all_items):
+            image = self.images[side.lower()]
+            if image is None:
+                continue
+
+            # Extract patch around fitted centre
+            pr = int(round(fit["row"]))
+            pc = int(round(fit["col"]))
+            y0 = max(pr - patch_radius, 0)
+            y1 = min(pr + patch_radius + 1, image.shape[0])
+            x0 = max(pc - patch_radius, 0)
+            x1 = min(pc + patch_radius + 1, image.shape[1])
+            patch = image[y0:y1, x0:x1].astype(float)
+
+            # Reconstruct the fitted Gaussian over the same patch region
+            y_grid, x_grid = np.mgrid[y0:y1, x0:x1]
+            coords = np.vstack((x_grid.ravel(), y_grid.ravel()))
+            params = np.array([
+                fit["amplitude"], fit["col"], fit["row"],
+                fit["sigma_x"], fit["sigma_y"],
+                np.radians(fit["theta_deg"]), fit["offset"],
+            ])
+            fitted = elliptical_gaussian(params, coords).reshape(patch.shape)
+            residual = patch - fitted
+
+            vmin, vmax = patch.min(), patch.max()
+            res_lim = max(float(np.abs(residual).max()), 1e-6)
+            rms = float(np.sqrt(np.mean(residual ** 2)))
+
+            ax_coord = fig.add_subplot(gs[row_idx, 0])
+            ax_data  = fig.add_subplot(gs[row_idx, 1])
+            ax_fit   = fig.add_subplot(gs[row_idx, 2])
+            ax_res   = fig.add_subplot(gs[row_idx, 3])
+
+            # ── Coordinate display ───────────────────────────────────────
+            ax_coord.set_axis_off()
+            ax_coord.text(
+                0.5, 0.65,
+                f"{side} #{peak_idx}",
+                ha="center", va="center",
+                fontsize=8, fontstyle="italic",
+                transform=ax_coord.transAxes,
+                color="#444444",
+            )
+            ax_coord.text(
+                0.5, 0.38,
+                f"x = {fit['col']:.2f}\ny = {fit['row']:.2f}",
+                ha="center", va="center",
+                fontsize=11, fontweight="bold",
+                transform=ax_coord.transAxes,
+                linespacing=1.6,
+            )
+
+            # ── Data image with crosshair at fitted centre ───────────────
+            ax_data.imshow(patch, cmap="gray", vmin=vmin, vmax=vmax, origin="upper")
+            cx = fit["col"] - x0  # centre in patch pixel coords
+            cy = fit["row"] - y0
+            ax_data.plot(cx, cy, "+", color="red", markersize=12, markeredgewidth=1.5)
+            ax_data.set_title("data", fontsize=7)
+
+            # ── Fitted Gaussian ──────────────────────────────────────────
+            ax_fit.imshow(fitted, cmap="gray", vmin=vmin, vmax=vmax, origin="upper")
+            ax_fit.set_title(
+                f"fit  σx={fit['sigma_x']:.1f} σy={fit['sigma_y']:.1f} θ={fit['theta_deg']:.1f}°",
+                fontsize=7,
+            )
+
+            # ── Residual ─────────────────────────────────────────────────
+            ax_res.imshow(residual, cmap="RdBu_r", vmin=-res_lim, vmax=res_lim, origin="upper")
+            ax_res.set_title(f"residual  rms={rms:.1f}", fontsize=7)
+
+            for ax in (ax_data, ax_fit, ax_res):
+                ax.tick_params(left=False, bottom=False,
+                               labelleft=False, labelbottom=False)
+
+        self._fit_mpl_canvas = FigureCanvasTkAgg(fig, master=self.fit_inner_frame)
+        self._fit_mpl_canvas.draw()
+        self._fit_mpl_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self.fit_inner_frame.update_idletasks()
+        self.fit_tk_canvas.configure(scrollregion=self.fit_tk_canvas.bbox("all"))
+
+    def _update_overlap_display(self) -> None:
+        """Rebuild the Overlap tab: one zoomed row per matched peak pair."""
+        if self.overlap_inner_frame is None or self.overlap_tk_canvas is None:
+            return
+
+        for widget in self.overlap_inner_frame.winfo_children():
+            widget.destroy()
+        self._overlap_mpl_canvas = None
+
+        left_img  = self.images["left"]
+        right_img = self.images["right"]
+
+        if left_img is None or right_img is None:
+            ttk.Label(
+                self.overlap_inner_frame,
+                text="Load and fit both images to see the overlap.",
+                padding=20,
+            ).pack()
+            self.overlap_tk_canvas.configure(
+                scrollregion=self.overlap_tk_canvas.bbox("all")
+            )
+            return
+
+        left_sorted  = sorted(self.fits["left"],  key=lambda f: f["row"])
+        right_sorted = sorted(self.fits["right"], key=lambda f: f["row"])
+        pairs = list(zip(left_sorted, right_sorted))
+
+        if not pairs:
+            ttk.Label(
+                self.overlap_inner_frame,
+                text="Fit both images first.",
+                padding=20,
+            ).pack()
+            self.overlap_tk_canvas.configure(
+                scrollregion=self.overlap_tk_canvas.bbox("all")
+            )
+            return
+
+        try:
+            patch_radius = int(self.param_vars["patch"].get())
+        except ValueError:
+            patch_radius = 12
+
+        def norm_patch(arr: np.ndarray) -> np.ndarray:
+            a = arr.astype(float)
+            mn, mx = a.min(), a.max()
+            return (a - mn) / (mx - mn) if mx > mn + 1e-9 else np.zeros_like(a)
+
+        n_rows = len(pairs)
+        row_height_in = 2.2
+        fig = Figure(figsize=(9.5, n_rows * row_height_in))
+        gs = fig.add_gridspec(
+            n_rows, 4,
+            width_ratios=[1.1, 2, 2, 2],
+            hspace=0.6, wspace=0.25,
+            left=0.02, right=0.98, top=0.98, bottom=0.02,
+        )
+
+        h_l, w_l = left_img.shape[:2]
+        h_r, w_r = right_img.shape[:2]
+
+        for row_idx, (lf, rf) in enumerate(pairs):
+            # Crop region anchored on the LEFT peak centre
+            pr = int(round(lf["row"]))
+            pc = int(round(lf["col"]))
+            y0 = max(pr - patch_radius, 0)
+            y1 = min(pr + patch_radius + 1, h_l)
+            x0 = max(pc - patch_radius, 0)
+            x1 = min(pc + patch_radius + 1, w_l)
+
+            left_patch = norm_patch(left_img[y0:y1, x0:x1])
+
+            # Extract the same pixel region from the right image (clipped to its bounds)
+            ry0 = max(y0, 0);  ry1 = min(y1, h_r)
+            rx0 = max(x0, 0);  rx1 = min(x1, w_r)
+            right_raw = np.zeros_like(left_patch)
+            if ry1 > ry0 and rx1 > rx0:
+                rp = norm_patch(right_img[ry0:ry1, rx0:rx1])
+                right_raw[:rp.shape[0], :rp.shape[1]] = rp
+            right_patch = right_raw
+
+            diff = left_patch - right_patch
+
+            # Sub-pixel offsets between fitted centres
+            dx = rf["col"] - lf["col"]
+            dy = rf["row"] - lf["row"]
+
+            # Marker positions in patch pixel coordinates
+            lx = lf["col"] - x0;  ly = lf["row"] - y0   # left peak (always centre)
+            rx = rf["col"] - x0;  ry = rf["row"] - y0   # right peak (may be offset)
+
+            # ── Coordinate info panel ────────────────────────────────────
+            ax_info = fig.add_subplot(gs[row_idx, 0])
+            ax_info.set_axis_off()
+            ax_info.text(0.5, 0.72, f"Pair {row_idx}",
+                         ha="center", va="center", fontsize=8, fontstyle="italic",
+                         color="#444444", transform=ax_info.transAxes)
+            ax_info.text(0.5, 0.42,
+                         f"Δx = {dx:+.2f} px\nΔy = {dy:+.2f} px",
+                         ha="center", va="center", fontsize=11, fontweight="bold",
+                         linespacing=1.7, transform=ax_info.transAxes)
+
+            # ── Image panels ─────────────────────────────────────────────
+            ax_l = fig.add_subplot(gs[row_idx, 1])
+            ax_r = fig.add_subplot(gs[row_idx, 2])
+            ax_d = fig.add_subplot(gs[row_idx, 3])
+
+            ax_l.imshow(left_patch,  cmap="gray", vmin=0, vmax=1, origin="upper")
+            ax_r.imshow(right_patch, cmap="gray", vmin=0, vmax=1, origin="upper")
+            lim = max(float(np.abs(diff).max()), 1e-9)
+            ax_d.imshow(diff, cmap="RdBu_r", vmin=-lim, vmax=lim, origin="upper")
+
+            # Mark both peak centres on every panel
+            marker_kw_l = dict(color="cyan",   marker="+", markersize=12,
+                               markeredgewidth=1.5, linestyle="none")
+            marker_kw_r = dict(color="orange", marker="x", markersize=10,
+                               markeredgewidth=1.5, linestyle="none")
+            for ax in (ax_l, ax_r, ax_d):
+                ax.plot(lx, ly, **marker_kw_l)
+                ax.plot(rx, ry, **marker_kw_r)
+
+            ax_l.set_title("left",            fontsize=7)
+            ax_r.set_title("right (same coords)", fontsize=7)
+            ax_d.set_title("left − right",    fontsize=7)
+
+            for ax in (ax_l, ax_r, ax_d):
+                ax.tick_params(left=False, bottom=False,
+                               labelleft=False, labelbottom=False)
+
+        self._overlap_mpl_canvas = FigureCanvasTkAgg(fig, master=self.overlap_inner_frame)
+        self._overlap_mpl_canvas.draw()
+        self._overlap_mpl_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self.overlap_inner_frame.update_idletasks()
+        self.overlap_tk_canvas.configure(
+            scrollregion=self.overlap_tk_canvas.bbox("all")
+        )
 
     def _save_results(self) -> None:
         if not self.distance_pairs:

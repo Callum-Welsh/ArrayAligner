@@ -349,10 +349,27 @@ def compute_alignment(
     # Model: right_y'[t] + shift_y + (t − t_k)·a = left_y'[t]
     # At t = t_k:  shift_y = left_y'[t_k] − right_y'[t_k] = dy_k
     # At t = t_m:  a = (dy_m − dy_k) / (t_m − t_k)
+    # ── SIGN CONVENTION NOTE ─────────────────────────────────────────────────
+    # shift_y = left_y' − right_y'.  Positive y' is DOWN (larger pixel row).
+    # Therefore:
+    #   shift_y > 0  →  left is BELOW right  (left is at higher frequency)
+    #   shift_y < 0  →  right is BELOW left  (right is at higher frequency)
+    #
+    # If you want "right is Δ MHz above left → positive output", negate these
+    # values: the code reports the CORRECTION to add to right to reach left,
+    # not the signed frequency offset of right relative to left.
+    #
+    # ── CALIBRATION (scale) ───────────────────────────────────────────────
+    # cal_scale (MHz/px) is computed from the pixel spacing of the top-two
+    # right-image peaks and the user-supplied MHz distance between them.
+    # It is always positive; the SIGN of the output comes only from shift_y/a.
     shift_x = dx_k    # left_x' − right_x' at anchor
     shift_y = dy_k    # left_y' − right_y' at anchor  (negative → right must move up)
     a = (dy_m - dy_k) / (m_tw - k_tw) if m_tw != k_tw else 0.0
 
+    # ── RESCALING: pixels → physical units ────────────────────────────────
+    # Multiply raw pixel shifts by cal_scale (MHz/px) to convert to MHz.
+    # If cal_scale is None (no calibration), scale=1.0 and units stay as px.
     scale = cal_scale if cal_scale is not None else 1.0
     units = "MHz" if cal_scale is not None else "px"
 
