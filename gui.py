@@ -45,7 +45,7 @@ class GaussianFitApp(tk.Tk):
         self.scale_ref_m_var = tk.StringVar(value="9")
         # Corresponding tweezer indices in the full array (default = same as pair indices)
         self.anchor_k_tweezer_var = tk.StringVar(value="0")
-        self.scale_ref_m_tweezer_var = tk.StringVar(value="9")
+        self.scale_ref_m_tweezer_var = tk.StringVar(value="36")
         # StringVars for the big red result display
         self.delta_values_var  = tk.StringVar(value="")
         self.delta_formula_var = tk.StringVar(value="")

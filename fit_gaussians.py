@@ -363,7 +363,7 @@ def compute_alignment(
     # cal_scale (MHz/px) is computed from the pixel spacing of the top-two
     # right-image peaks and the user-supplied MHz distance between them.
     # It is always positive; the SIGN of the output comes only from shift_y/a.
-    shift_x = dx_k    # left_x' − right_x' at anchor
+    shift_x = float(np.mean([p[0] for p in pairs]))  # average left_x'−right_x' over all pairs
     shift_y = dy_k    # left_y' − right_y' at anchor  (negative → right must move up)
     a = (dy_m - dy_k) / (m_tw - k_tw) if m_tw != k_tw else 0.0
 
