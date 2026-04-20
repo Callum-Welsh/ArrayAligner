@@ -121,11 +121,17 @@ class CalibrationSession:
 
         scheduler = ts.TweezerScheduler(awg, NUM_TWEEZERS, SCHEDULER_IP, SCHEDULER_PORT)
 
+        # scheduler.run() is a blocking event loop — run it in a background thread
+        # so image capture can proceed. scheduler.stop() in the finally block
+        # signals it to exit.
+        run_thread = threading.Thread(target=scheduler.run, daemon=True, name="tweezer-scheduler")
+
         try:
             scheduler.upload_waveforms()
             scheduler.awg.start_hardware()
             scheduler.start_servers()
-            scheduler.run()
+            run_thread.start()
+            print("Image Capture Running!")
 
             # Capture interlace image (AWG in interlace configuration)
             interlace_path = output_dir / f'interlace_{phase}.tif'
@@ -145,10 +151,9 @@ class CalibrationSession:
 
         finally:
             # ── Unconditional AWG teardown ────────────────────────────────────
-            # Each step is wrapped individually so a failure in one doesn't
-            # prevent the others from running.
+            # scheduler.stop() signals run_thread to exit, then we wait for it.
             for fn, label in [
-                (scheduler.stop, "scheduler.stop()"),   # stops servers + closes shared memory
+                (scheduler.stop, "scheduler.stop()"),   # signals run loop to exit + closes shared memory
                 (awg.stop_card,  "awg.stop_card()"),    # stops card playback
                 (awg.close_card, "awg.close_card()"),   # releases card handle
             ]:
@@ -156,6 +161,7 @@ class CalibrationSession:
                     fn()
                 except Exception as exc:
                     print(f"Warning: cleanup step '{label}' raised: {exc}")
+            run_thread.join(timeout=5)
 
     def close(self) -> None:
         """Release the camera."""
