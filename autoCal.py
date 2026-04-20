@@ -1,4 +1,4 @@
-import awgcontrol as ac
+import tweezer.awgcontrol as ac
 import numpy as np
 from instrumental.drivers.cameras import uc480
 import threading
@@ -41,7 +41,7 @@ class CalibrationSession:
         self._int_10 = log.load_rf_config("2026-1-30-int_10_4MHz")
         self._main_10 = log.load_rf_config("2026-02-02-main_4MHz_10_corrected")
 
-        aod = ac.Aod(_CHANNELS, _AMPLITUDES)
+        aod = ti.Aod(_CHANNELS, _AMPLITUDES)
         self._awg = ac.AwgController(400, aod)
         self._awg.initialize_card()
         self._aod = aod
@@ -98,9 +98,13 @@ class CalibrationSession:
 
         self._aod.add_array(rf_params_interlace, duration=1000, trigger=True, moving_flag=False)
         self._aod.add_array(rf_params_main, duration=1000, trigger=True, moving_flag=False)
-        self._awg.generate_tweezer_arrays()
-        self._awg.upload_tweezer_arrays()
-        self._awg.start_hardware()
+
+        scheduler = ts.TweezerScheduler(awg, num_tweezers, ip, port)
+        scheduler.upload_waveforms()
+        scheduler.awg.start_hardware()
+
+        scheduler.start_servers()
+        scheduler.run()
 
         interlace_path = output_dir / f'interlace_{phase}.tif'
         img = self._capture_average()
