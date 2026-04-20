@@ -70,6 +70,8 @@ class GaussianFitApp(tk.Tk):
         self._autocal_btn: ttk.Button | None = None
         self._autocal_cancel_btn: ttk.Button | None = None
         self._autocal_session = None  # CalibrationSession | None
+        self._notebook: ttk.Notebook | None = None
+        self._autocal_tab: ttk.Frame | None = None
         self._autocal_status_var = tk.StringVar(value="Press Auto-Cal to begin. Each press resets parameters to zero.")
         self._autocal_corrections_var = tk.StringVar(value="")
         self._autocal_verification_var = tk.StringVar(value="")
@@ -112,12 +114,14 @@ class GaussianFitApp(tk.Tk):
         self._autocal_cancel_btn.pack(side=tk.LEFT, padx=2)
 
         notebook = ttk.Notebook(self)
+        self._notebook = notebook
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         images_tab = ttk.Frame(notebook)
         results_tab = ttk.Frame(notebook)
         fits_tab = ttk.Frame(notebook)
         overlap_tab = ttk.Frame(notebook)
         autocal_tab = ttk.Frame(notebook)
+        self._autocal_tab = autocal_tab
         notebook.add(images_tab, text="Images")
         notebook.add(results_tab, text="Results")
         notebook.add(fits_tab, text="Fits & Residuals")
@@ -971,11 +975,15 @@ class GaussianFitApp(tk.Tk):
         self._autocal_session = None
         self._autocal_corrections_var.set("")
         self._autocal_verification_var.set("")
+        self._autocal_status_var.set("Auto-Cal: starting...")
+        if self._notebook is not None and self._autocal_tab is not None:
+            self._notebook.select(self._autocal_tab)
         if self._autocal_btn is not None:
             self._autocal_btn.config(state="disabled")
         if self._autocal_cancel_btn is not None:
             self._autocal_cancel_btn.config(state="normal")
-        thread = threading.Thread(target=self._autocal_thread_fn, daemon=True)
+        output_dir = pathlib.Path(self._autocal_dir_var.get())
+        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir,), daemon=True)
         thread.start()
 
     def _cancel_autocal(self) -> None:
@@ -985,11 +993,9 @@ class GaussianFitApp(tk.Tk):
         if self._autocal_session is not None:
             self._autocal_session.cancel()
 
-    def _autocal_thread_fn(self) -> None:
+    def _autocal_thread_fn(self, output_dir: pathlib.Path) -> None:
         try:
             from autoCal import CalibrationParams, CalibrationSession
-
-            output_dir = pathlib.Path(self._autocal_dir_var.get())
 
             # ── Cycle 1: zero params ─────────────────────────────────────────
             self.after(0, lambda: self._autocal_status_var.set(
@@ -1002,8 +1008,8 @@ class GaussianFitApp(tk.Tk):
             # Fit cycle-1 images on GUI thread and compute alignment
             fit1_done = threading.Event()
             self.after(0, lambda: self._autocal_load_fit_calibrate(
-                output_dir / "interlace_start.tif",
                 output_dir / "main_start.tif",
+                output_dir / "interlace_start.tif",
                 "Auto-Cal: Cycle 1 — fitting images...",
                 fit1_done,
             ))
@@ -1033,8 +1039,8 @@ class GaussianFitApp(tk.Tk):
 
             fit2_done = threading.Event()
             self.after(0, lambda: self._autocal_load_fit_calibrate(
-                output_dir / "interlace_stop.tif",
                 output_dir / "main_stop.tif",
+                output_dir / "interlace_stop.tif",
                 "Auto-Cal: Cycle 2 — fitting verification images...",
                 fit2_done,
             ))
@@ -1050,9 +1056,7 @@ class GaussianFitApp(tk.Tk):
                 f"  Δ scale     =  {a['scale_a']:+.6f}  {units} / tweezer\n\n"
                 f"  Δ horizontal =  {a['shift_x_rot']:+.6f}  {units}"
             ))
-            self.after(0, lambda: self._autocal_status_var.set(
-                "Auto-Cal complete. Corrections are shown below; verification residuals should be ≈ 0."
-            ))
+            self.after(0, self._autocal_finish_ui)
 
         except InterruptedError:
             self.after(0, lambda: self._autocal_status_var.set(
@@ -1060,7 +1064,10 @@ class GaussianFitApp(tk.Tk):
             ))
         except Exception as exc:
             err = str(exc)
-            self.after(0, lambda: self._autocal_status_var.set(f"Auto-Cal failed: {err}"))
+            self.after(0, lambda e=err: (
+                self._autocal_status_var.set(f"Auto-Cal failed: {e}"),
+                messagebox.showerror("Auto-Cal failed", e),
+            ))
         finally:
             if self._autocal_session is not None:
                 self._autocal_session.close()
@@ -1142,6 +1149,13 @@ class GaussianFitApp(tk.Tk):
             self._autocal_status_var.set(f"Auto-Cal error during fitting: {exc}")
         finally:
             done_event.set()
+
+    def _autocal_finish_ui(self) -> None:
+        self._autocal_status_var.set(
+            "Auto-Cal complete. Verification images loaded — use Images / Overlap / Results tabs to evaluate."
+        )
+        if self._notebook is not None:
+            self._notebook.select(0)  # switch to Images tab
 
     def _autocal_browse_dir(self) -> None:
         chosen = filedialog.askdirectory(
