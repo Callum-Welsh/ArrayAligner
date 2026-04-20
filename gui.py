@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import math
 import pathlib
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -38,7 +39,7 @@ class GaussianFitApp(tk.Tk):
         self.results_status_var = tk.StringVar(value="Distances will appear after fitting.")
         self.shift_info_var = tk.StringVar(value="Shift info will appear after matching.")
         self.distance_pairs: list[dict] = []
-        self.calibration_distance_var = tk.StringVar(value="1")
+        self.calibration_distance_var = tk.StringVar(value="4")
         self.calibration_scale: float | None = None
         # Detected-pair indices (0 = topmost detected peak, counting downward)
         self.anchor_k_var = tk.StringVar(value="0")
@@ -65,6 +66,13 @@ class GaussianFitApp(tk.Tk):
         self.overlap_inner_frame: ttk.Frame | None = None
         self._overlap_window_id: int | None = None
         self._overlap_mpl_canvas: FigureCanvasTkAgg | None = None
+        self._autocal_running: bool = False
+        self._autocal_btn: ttk.Button | None = None
+        self._autocal_status_var = tk.StringVar(value="Press Auto-Cal to begin. Each press resets parameters to zero.")
+        self._autocal_corrections_var = tk.StringVar(value="")
+        self._autocal_verification_var = tk.StringVar(value="")
+        self._autocal_last_al: dict | None = None
+        self._autocal_output_dir: pathlib.Path = pathlib.Path(__file__).parent
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -95,6 +103,8 @@ class GaussianFitApp(tk.Tk):
         ttk.Label(button_frame, text="Cal dist (MHz):").pack(side=tk.LEFT, padx=(12, 2))
         ttk.Entry(button_frame, width=7, textvariable=self.calibration_distance_var).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="Calibrate", command=self._calibrate).pack(side=tk.LEFT, padx=4)
+        self._autocal_btn = ttk.Button(button_frame, text="Auto-Cal", command=self._start_autocal)
+        self._autocal_btn.pack(side=tk.LEFT, padx=12)
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -102,10 +112,51 @@ class GaussianFitApp(tk.Tk):
         results_tab = ttk.Frame(notebook)
         fits_tab = ttk.Frame(notebook)
         overlap_tab = ttk.Frame(notebook)
+        autocal_tab = ttk.Frame(notebook)
         notebook.add(images_tab, text="Images")
         notebook.add(results_tab, text="Results")
         notebook.add(fits_tab, text="Fits & Residuals")
         notebook.add(overlap_tab, text="Overlap")
+        notebook.add(autocal_tab, text="Auto-Cal")
+
+        # ── Auto-Cal tab ─────────────────────────────────────────────────────
+        BIG_FONT = ("TkFixedFont", 14, "bold")
+        MED_FONT = ("TkFixedFont", 12)
+
+        ttk.Label(
+            autocal_tab,
+            textvariable=self._autocal_status_var,
+            wraplength=700,
+            font=("TkDefaultFont", 10),
+        ).pack(fill=tk.X, padx=12, pady=(10, 4))
+
+        corrections_frame = ttk.LabelFrame(
+            autocal_tab,
+            text="Corrections applied  (Cycle 1 → Cycle 2, always from zero)",
+        )
+        corrections_frame.pack(fill=tk.X, padx=12, pady=6)
+        tk.Label(
+            corrections_frame,
+            textvariable=self._autocal_corrections_var,
+            font=BIG_FONT,
+            fg="red",
+            justify=tk.LEFT,
+            anchor=tk.W,
+        ).pack(fill=tk.X, padx=14, pady=10)
+
+        verification_frame = ttk.LabelFrame(
+            autocal_tab,
+            text="Verification residuals  (Cycle 2 fit — should be ≈ 0)",
+        )
+        verification_frame.pack(fill=tk.X, padx=12, pady=6)
+        tk.Label(
+            verification_frame,
+            textvariable=self._autocal_verification_var,
+            font=MED_FONT,
+            fg="gray40",
+            justify=tk.LEFT,
+            anchor=tk.W,
+        ).pack(fill=tk.X, padx=14, pady=10)
 
         # ── Overlap tab (scrollable, same pattern as Fits & Residuals) ───────
         overlap_scroll_outer = ttk.Frame(overlap_tab)
@@ -896,6 +947,193 @@ class GaussianFitApp(tk.Tk):
                     }
                 )
         messagebox.showinfo("Saved", f"Wrote {len(self.distance_pairs)} rows to {path}")
+
+
+    # ── Auto-Cal methods ─────────────────────────────────────────────────────
+
+    def _start_autocal(self) -> None:
+        if self._autocal_running:
+            messagebox.showwarning("Auto-Cal", "Auto-calibration is already running.")
+            return
+        self._autocal_running = True
+        self._autocal_corrections_var.set("")
+        self._autocal_verification_var.set("")
+        if self._autocal_btn is not None:
+            self._autocal_btn.config(state="disabled")
+        thread = threading.Thread(target=self._autocal_thread_fn, daemon=True)
+        thread.start()
+
+    def _autocal_thread_fn(self) -> None:
+        session = None
+        try:
+            from autoCal import CalibrationParams, CalibrationSession
+
+            output_dir = self._autocal_output_dir
+
+            # ── Cycle 1: zero params ─────────────────────────────────────────
+            self.after(0, lambda: self._autocal_status_var.set(
+                "Auto-Cal: Cycle 1 — programming AWG with zero parameters and capturing images..."
+            ))
+            session = CalibrationSession()
+            session.run_cycle(CalibrationParams(), "start", output_dir)
+
+            # Fit cycle-1 images on GUI thread and compute alignment
+            fit1_done = threading.Event()
+            self.after(0, lambda: self._autocal_load_fit_calibrate(
+                output_dir / "interlace_start.tif",
+                output_dir / "main_start.tif",
+                "Auto-Cal: Cycle 1 — fitting images...",
+                fit1_done,
+            ))
+            fit1_done.wait()
+
+            if self._autocal_last_al is None:
+                raise RuntimeError("Cycle-1 alignment computation failed — check fit parameters and index settings.")
+
+            al1 = self._autocal_last_al
+            u = al1["units"]
+            corrections = CalibrationParams(
+                vertical_alignment_delta=al1["shift_y_rot"],
+                vertical_alignment_scale=al1["scale_a"],
+                horizontal_alignment_delta=al1["shift_x_rot"],
+            )
+            self.after(0, lambda c=corrections, units=u: self._autocal_corrections_var.set(
+                f"  Δ vertical  (vertical_alignment_delta)  =  {c.vertical_alignment_delta:+.6f}  {units}\n\n"
+                f"  Δ scale     (vertical_alignment_scale)  =  {c.vertical_alignment_scale:+.6f}  {units} / tweezer\n\n"
+                f"  Δ horizontal (horizontal_alignment_delta) =  {c.horizontal_alignment_delta:+.6f}  {units}"
+            ))
+
+            # ── Cycle 2: corrected params (verification) ─────────────────────
+            self.after(0, lambda: self._autocal_status_var.set(
+                "Auto-Cal: Cycle 2 — programming AWG with corrections and capturing verification images..."
+            ))
+            session.run_cycle(corrections, "stop", output_dir)
+
+            fit2_done = threading.Event()
+            self.after(0, lambda: self._autocal_load_fit_calibrate(
+                output_dir / "interlace_stop.tif",
+                output_dir / "main_stop.tif",
+                "Auto-Cal: Cycle 2 — fitting verification images...",
+                fit2_done,
+            ))
+            fit2_done.wait()
+
+            if self._autocal_last_al is None:
+                raise RuntimeError("Cycle-2 verification alignment computation failed.")
+
+            al2 = self._autocal_last_al
+            u2 = al2["units"]
+            self.after(0, lambda a=al2, units=u2: self._autocal_verification_var.set(
+                f"  Δ vertical  =  {a['shift_y_rot']:+.6f}  {units}\n\n"
+                f"  Δ scale     =  {a['scale_a']:+.6f}  {units} / tweezer\n\n"
+                f"  Δ horizontal =  {a['shift_x_rot']:+.6f}  {units}"
+            ))
+            self.after(0, lambda: self._autocal_status_var.set(
+                "Auto-Cal complete. Corrections are shown below; verification residuals should be ≈ 0."
+            ))
+
+        except Exception as exc:
+            err = str(exc)
+            self.after(0, lambda: self._autocal_status_var.set(f"Auto-Cal error: {err}"))
+        finally:
+            if session is not None:
+                session.close()
+            self._autocal_running = False
+            if self._autocal_btn is not None:
+                self.after(0, lambda: self._autocal_btn.config(state="normal"))
+
+    def _autocal_load_fit_calibrate(
+        self,
+        left_path: pathlib.Path,
+        right_path: pathlib.Path,
+        status_msg: str,
+        done_event: threading.Event,
+    ) -> None:
+        """Load two TIFFs, fit peaks, run pixel calibration, compute alignment. Runs on GUI thread."""
+        self._autocal_last_al = None
+        try:
+            self._autocal_status_var.set(status_msg)
+            for side, path in [("left", left_path), ("right", right_path)]:
+                raw = tifffile.imread(str(path))
+                self.images[side] = ensure_2d(raw)
+                self.paths[side] = pathlib.Path(path)
+                self.fits[side] = []
+                self.calibration_scale = None
+                self._update_display(side)
+                self._update_name(side)
+
+            try:
+                patch = int(self.param_vars["patch"].get())
+                min_distance = int(self.param_vars["min_distance"].get())
+                threshold_str = self.param_vars["threshold"].get().strip()
+                threshold = float(threshold_str) if threshold_str else None
+                max_peaks = int(self.param_vars["max_peaks"].get())
+                max_peaks = None if max_peaks <= 0 else max_peaks
+                ftol = float(self.param_vars["ftol"].get())
+                xtol = float(self.param_vars["xtol"].get())
+                gtol = float(self.param_vars["gtol"].get())
+            except ValueError as exc:
+                raise RuntimeError(f"Invalid fit parameter: {exc}") from exc
+
+            for side in ("left", "right"):
+                results, processed = fit_image_array(
+                    self.images[side],
+                    patch_radius=patch,
+                    min_distance=min_distance,
+                    threshold_abs=threshold,
+                    max_peaks=max_peaks,
+                    ftol=ftol,
+                    xtol=xtol,
+                    gtol=gtol,
+                )
+                self.fits[side] = results
+                self.images[side] = processed
+                self._update_display(side)
+
+            self._update_status()
+            self._update_results()
+            self._update_fit_display()
+            self._update_overlap_display()
+
+            self._run_calibration_silent()
+
+            if not (self.fits["left"] and self.fits["right"]):
+                raise RuntimeError("No peaks found in one or both images after fitting.")
+
+            k    = int(self.anchor_k_var.get())
+            m    = int(self.scale_ref_m_var.get())
+            k_tw = int(self.anchor_k_tweezer_var.get())
+            m_tw = int(self.scale_ref_m_tweezer_var.get())
+            self._autocal_last_al = compute_alignment(
+                self.fits["left"], self.fits["right"], self.calibration_scale,
+                k, m, k_tw, m_tw,
+            )
+
+        except Exception as exc:
+            self._autocal_status_var.set(f"Auto-Cal error during fitting: {exc}")
+        finally:
+            done_event.set()
+
+    def _run_calibration_silent(self) -> None:
+        """Compute pixel→MHz calibration scale without showing any dialog."""
+        if len(self.fits["right"]) < 2:
+            return
+        right = sorted(self.fits["right"], key=lambda fit: fit["row"])
+        first, second = right[0], right[1]
+        measured = math.hypot(
+            float(first["col"]) - float(second["col"]),
+            float(first["row"]) - float(second["row"]),
+        )
+        if measured <= 0:
+            return
+        try:
+            target = float(self.calibration_distance_var.get())
+        except ValueError:
+            return
+        if target <= 0:
+            return
+        self.calibration_scale = target / measured
+        self._update_results()
 
 
 if __name__ == "__main__":
