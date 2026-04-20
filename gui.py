@@ -73,6 +73,7 @@ class GaussianFitApp(tk.Tk):
         self._autocal_verification_var = tk.StringVar(value="")
         self._autocal_last_al: dict | None = None
         self._autocal_output_dir: pathlib.Path = pathlib.Path(__file__).parent
+        self._autocal_dir_var = tk.StringVar(value=str(self._autocal_output_dir))
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -123,12 +124,19 @@ class GaussianFitApp(tk.Tk):
         BIG_FONT = ("TkFixedFont", 14, "bold")
         MED_FONT = ("TkFixedFont", 12)
 
+        dir_frame = ttk.LabelFrame(autocal_tab, text="Image save directory  (interlace_start/stop.tif, main_start/stop.tif)")
+        dir_frame.pack(fill=tk.X, padx=12, pady=(10, 4))
+        dir_inner = ttk.Frame(dir_frame)
+        dir_inner.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Entry(dir_inner, textvariable=self._autocal_dir_var, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(dir_inner, text="Browse…", command=self._autocal_browse_dir).pack(side=tk.LEFT, padx=(6, 0))
+
         ttk.Label(
             autocal_tab,
             textvariable=self._autocal_status_var,
             wraplength=700,
             font=("TkDefaultFont", 10),
-        ).pack(fill=tk.X, padx=12, pady=(10, 4))
+        ).pack(fill=tk.X, padx=12, pady=(6, 4))
 
         corrections_frame = ttk.LabelFrame(
             autocal_tab,
@@ -968,7 +976,7 @@ class GaussianFitApp(tk.Tk):
         try:
             from autoCal import CalibrationParams, CalibrationSession
 
-            output_dir = self._autocal_output_dir
+            output_dir = pathlib.Path(self._autocal_dir_var.get())
 
             # ── Cycle 1: zero params ─────────────────────────────────────────
             self.after(0, lambda: self._autocal_status_var.set(
@@ -1113,6 +1121,14 @@ class GaussianFitApp(tk.Tk):
             self._autocal_status_var.set(f"Auto-Cal error during fitting: {exc}")
         finally:
             done_event.set()
+
+    def _autocal_browse_dir(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="Select directory for auto-cal images",
+            initialdir=self._autocal_dir_var.get(),
+        )
+        if chosen:
+            self._autocal_dir_var.set(chosen)
 
     def _run_calibration_silent(self) -> None:
         """Compute pixel→MHz calibration scale without showing any dialog."""
