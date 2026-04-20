@@ -1,6 +1,7 @@
 import awgcontrol as ac
 import numpy as np
 from instrumental.drivers.cameras import uc480
+import threading
 import time
 from pathlib import Path
 import tweezer.interface as ti
@@ -34,6 +35,8 @@ class CalibrationSession:
     """Manages hardware lifecycle for one auto-calibration run."""
 
     def __init__(self):
+        self._cancel = threading.Event()
+
         log = Logger()
         self._int_10 = log.load_rf_config("2026-1-30-int_10_4MHz")
         self._main_10 = log.load_rf_config("2026-02-02-main_4MHz_10_corrected")
@@ -48,12 +51,18 @@ class CalibrationSession:
         self._cam = uc480.UC480_Camera(instruments[0])
         self._cam.pixelclock = '40MHz'
 
+    def cancel(self) -> None:
+        """Signal the session to abort at the next safe point (between shots)."""
+        self._cancel.set()
+
     def _capture_average(self, exposure_ms: float = 0.01, num_shots: int = 20, total_duration: float = 10.0) -> np.ndarray:
         interval = total_duration / num_shots
         accumulator = None
         original_dtype = None
         print(f"Capturing: {num_shots} shots over {total_duration}s...")
         for i in range(num_shots):
+            if self._cancel.is_set():
+                raise InterruptedError("Calibration cancelled by user")
             start = time.time()
             img = self._cam.grab_image(timeout='10s', copy=True, exposure_time=f"{exposure_ms}ms")
             if accumulator is None:

@@ -68,6 +68,8 @@ class GaussianFitApp(tk.Tk):
         self._overlap_mpl_canvas: FigureCanvasTkAgg | None = None
         self._autocal_running: bool = False
         self._autocal_btn: ttk.Button | None = None
+        self._autocal_cancel_btn: ttk.Button | None = None
+        self._autocal_session = None  # CalibrationSession | None
         self._autocal_status_var = tk.StringVar(value="Press Auto-Cal to begin. Each press resets parameters to zero.")
         self._autocal_corrections_var = tk.StringVar(value="")
         self._autocal_verification_var = tk.StringVar(value="")
@@ -106,6 +108,8 @@ class GaussianFitApp(tk.Tk):
         ttk.Button(button_frame, text="Calibrate", command=self._calibrate).pack(side=tk.LEFT, padx=4)
         self._autocal_btn = ttk.Button(button_frame, text="Auto-Cal", command=self._start_autocal)
         self._autocal_btn.pack(side=tk.LEFT, padx=12)
+        self._autocal_cancel_btn = ttk.Button(button_frame, text="Cancel", command=self._cancel_autocal, state="disabled")
+        self._autocal_cancel_btn.pack(side=tk.LEFT, padx=2)
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -964,15 +968,24 @@ class GaussianFitApp(tk.Tk):
             messagebox.showwarning("Auto-Cal", "Auto-calibration is already running.")
             return
         self._autocal_running = True
+        self._autocal_session = None
         self._autocal_corrections_var.set("")
         self._autocal_verification_var.set("")
         if self._autocal_btn is not None:
             self._autocal_btn.config(state="disabled")
+        if self._autocal_cancel_btn is not None:
+            self._autocal_cancel_btn.config(state="normal")
         thread = threading.Thread(target=self._autocal_thread_fn, daemon=True)
         thread.start()
 
+    def _cancel_autocal(self) -> None:
+        if self._autocal_cancel_btn is not None:
+            self._autocal_cancel_btn.config(state="disabled")
+        self._autocal_status_var.set("Auto-Cal: cancelling — waiting for current shot to finish...")
+        if self._autocal_session is not None:
+            self._autocal_session.cancel()
+
     def _autocal_thread_fn(self) -> None:
-        session = None
         try:
             from autoCal import CalibrationParams, CalibrationSession
 
@@ -983,6 +996,7 @@ class GaussianFitApp(tk.Tk):
                 "Auto-Cal: Cycle 1 — programming AWG with zero parameters and capturing images..."
             ))
             session = CalibrationSession()
+            self._autocal_session = session
             session.run_cycle(CalibrationParams(), "start", output_dir)
 
             # Fit cycle-1 images on GUI thread and compute alignment
@@ -1040,15 +1054,22 @@ class GaussianFitApp(tk.Tk):
                 "Auto-Cal complete. Corrections are shown below; verification residuals should be ≈ 0."
             ))
 
+        except InterruptedError:
+            self.after(0, lambda: self._autocal_status_var.set(
+                "Auto-Cal cancelled. Hardware has been released."
+            ))
         except Exception as exc:
             err = str(exc)
-            self.after(0, lambda: self._autocal_status_var.set(f"Auto-Cal error: {err}"))
+            self.after(0, lambda: self._autocal_status_var.set(f"Auto-Cal failed: {err}"))
         finally:
-            if session is not None:
-                session.close()
+            if self._autocal_session is not None:
+                self._autocal_session.close()
+                self._autocal_session = None
             self._autocal_running = False
             if self._autocal_btn is not None:
                 self.after(0, lambda: self._autocal_btn.config(state="normal"))
+            if self._autocal_cancel_btn is not None:
+                self.after(0, lambda: self._autocal_cancel_btn.config(state="disabled"))
 
     def _autocal_load_fit_calibrate(
         self,
