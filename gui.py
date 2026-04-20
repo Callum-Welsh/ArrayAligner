@@ -985,6 +985,7 @@ class GaussianFitApp(tk.Tk):
         output_dir = pathlib.Path(self._autocal_dir_var.get())
         thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir,), daemon=True)
         thread.start()
+        self.after(100, self._autocal_watch_completion)
 
     def _cancel_autocal(self) -> None:
         if self._autocal_cancel_btn is not None:
@@ -1072,11 +1073,7 @@ class GaussianFitApp(tk.Tk):
             if self._autocal_session is not None:
                 self._autocal_session.close()
                 self._autocal_session = None
-            self._autocal_running = False
-            if self._autocal_btn is not None:
-                self.after(0, lambda: self._autocal_btn.config(state="normal"))
-            if self._autocal_cancel_btn is not None:
-                self.after(0, lambda: self._autocal_cancel_btn.config(state="disabled"))
+            self._autocal_running = False  # watcher on main thread re-enables buttons
 
     def _autocal_load_fit_calibrate(
         self,
@@ -1149,6 +1146,16 @@ class GaussianFitApp(tk.Tk):
             self._autocal_status_var.set(f"Auto-Cal error during fitting: {exc}")
         finally:
             done_event.set()
+
+    def _autocal_watch_completion(self) -> None:
+        """Poll on the main thread until the background thread finishes, then re-enable buttons."""
+        if self._autocal_running:
+            self.after(100, self._autocal_watch_completion)
+            return
+        if self._autocal_btn is not None:
+            self._autocal_btn.config(state="normal")
+        if self._autocal_cancel_btn is not None:
+            self._autocal_cancel_btn.config(state="disabled")
 
     def _autocal_finish_ui(self) -> None:
         self._autocal_status_var.set(
