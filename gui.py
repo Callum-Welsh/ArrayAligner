@@ -83,6 +83,9 @@ class GaussianFitApp(tk.Tk):
         self._params_delta_var = tk.StringVar(value="0.0")
         self._params_scale_var = tk.StringVar(value="0.0")
         self._params_horiz_var = tk.StringVar(value="0.0")
+        self._sign_flip_delta = tk.BooleanVar(value=False)
+        self._sign_flip_scale = tk.BooleanVar(value=False)
+        self._sign_flip_horiz = tk.BooleanVar(value=False)
         self._load_cal_params()
         self._build_ui()
 
@@ -154,15 +157,16 @@ class GaussianFitApp(tk.Tk):
         params_inner = ttk.Frame(params_frame)
         params_inner.pack(fill=tk.X, padx=8, pady=6)
 
-        for label_text, var in [
-            ("vertical_alignment_delta:", self._params_delta_var),
-            ("vertical_alignment_scale (MHz/tw):", self._params_scale_var),
-            ("horizontal_alignment_delta:", self._params_horiz_var),
+        for label_text, var, flip_var in [
+            ("vertical_alignment_delta:",    self._params_delta_var, self._sign_flip_delta),
+            ("vertical_alignment_scale (MHz/tw):", self._params_scale_var, self._sign_flip_scale),
+            ("horizontal_alignment_delta:",  self._params_horiz_var, self._sign_flip_horiz),
         ]:
             row = ttk.Frame(params_inner)
             row.pack(fill=tk.X, pady=1)
             ttk.Label(row, text=label_text, width=36, anchor=tk.W).pack(side=tk.LEFT)
             ttk.Entry(row, textvariable=var, width=14).pack(side=tk.LEFT, padx=4)
+            ttk.Checkbutton(row, text="invert correction", variable=flip_var).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Button(
             params_inner, text="Reset to zero",
@@ -1027,7 +1031,12 @@ class GaussianFitApp(tk.Tk):
             if self._autocal_cancel_btn is not None:
                 self._autocal_cancel_btn.config(state="disabled")
             return
-        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir, starting), daemon=True)
+        sign_flips = (
+            self._sign_flip_delta.get(),
+            self._sign_flip_scale.get(),
+            self._sign_flip_horiz.get(),
+        )
+        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir, starting, sign_flips), daemon=True)
         thread.start()
         self.after(100, self._autocal_watch_completion)
 
@@ -1038,11 +1047,13 @@ class GaussianFitApp(tk.Tk):
         if self._autocal_session is not None:
             self._autocal_session.cancel()
 
-    def _autocal_thread_fn(self, output_dir: pathlib.Path, starting: dict) -> None:
+    def _autocal_thread_fn(self, output_dir: pathlib.Path, starting: dict,
+                           sign_flips: tuple[bool, bool, bool]) -> None:
         try:
             from autoCal import CalibrationParams, CalibrationSession
 
             starting_params = CalibrationParams(**starting)
+            flip_delta, flip_scale, flip_horiz = sign_flips
 
             # ── Cycle 1: starting params ──────────────────────────────────────
             self.after(0, lambda: self._autocal_status_var.set(
@@ -1065,11 +1076,14 @@ class GaussianFitApp(tk.Tk):
                 raise RuntimeError("Cycle-1 alignment computation failed — check fit parameters and index settings.")
 
             al1 = self._autocal_last_al
-            # New params = starting + residual δ from fitting
+            s_d = -1.0 if flip_delta else 1.0
+            s_a = -1.0 if flip_scale else 1.0
+            s_h = -1.0 if flip_horiz else 1.0
+            # New params = starting + (optionally inverted) residual δ from fitting
             new_params = CalibrationParams(
-                vertical_alignment_delta=starting_params.vertical_alignment_delta + al1["shift_y_rot"],
-                vertical_alignment_scale=starting_params.vertical_alignment_scale + al1["scale_a"],
-                horizontal_alignment_delta=starting_params.horizontal_alignment_delta + al1["shift_x_rot"],
+                vertical_alignment_delta=starting_params.vertical_alignment_delta + s_d * al1["shift_y_rot"],
+                vertical_alignment_scale=starting_params.vertical_alignment_scale + s_a * al1["scale_a"],
+                horizontal_alignment_delta=starting_params.horizontal_alignment_delta + s_h * al1["shift_x_rot"],
             )
 
             # ── Cycle 2: new params (verification) ───────────────────────────

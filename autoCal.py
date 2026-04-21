@@ -145,7 +145,11 @@ class CalibrationSession:
             params.vertical_alignment_delta + _MERGE_DISTANCE,
             params.vertical_alignment_scale,
         )
-        int_10_horizontal     = ti.generate_rf_params(np.array([32.5 * 200]), np.array([100]), np.array([0]))
+        int_10_horizontal     = _shift(
+            ti.generate_rf_params(np.array([32.5 * 200]), np.array([100]), np.array([0])),
+            params.horizontal_alignment_delta,
+            0,
+        )
         int_10_horizontal_off = ti.generate_rf_params(np.array([32.5 * 200]), np.array([100]), np.array([0]))
         main_10_merge         = _shift(self._main_10, -0.5, 0)
         main_10_horizontal    = ti.generate_rf_params(np.array([32.5 * 100]), np.array([100]), np.array([0]))
@@ -160,6 +164,12 @@ class CalibrationSession:
         awg.initialize_card()
         aod.add_array(rf_params_interlace, duration=1000, trigger=True, moving_flag=False)
         aod.add_array(rf_params_main,      duration=1000, trigger=True, moving_flag=False)
+
+        print(f"[autoCal] phase={phase!r}  "
+              f"vertical_delta={params.vertical_alignment_delta:+.6f} MHz  "
+              f"vertical_scale={params.vertical_alignment_scale:+.6f} MHz/tw  "
+              f"horizontal_delta={params.horizontal_alignment_delta:+.6f} MHz  "
+              f"(total freqDelta to interlace = {params.vertical_alignment_delta + _MERGE_DISTANCE:+.6f} MHz)")
 
         # Defensive: unlink any shared memory left by a previous crashed session
         # before TweezerScheduler.__init__ tries to create it with create=True.
