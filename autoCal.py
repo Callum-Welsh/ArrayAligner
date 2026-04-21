@@ -5,6 +5,7 @@ from instrumental.drivers.cameras import uc480
 import threading
 import time
 from pathlib import Path
+from multiprocessing import shared_memory as _mp_shm
 import tweezer.interface as ti
 from tweezer.logger import Logger
 from dataclasses import dataclass
@@ -26,7 +27,28 @@ _AMPLITUDES = [720, 540, 620, 540]
 SCHEDULER_IP   = "169.254.208.242"
 SCHEDULER_PORT = 5014
 NUM_TWEEZERS   = 39
+
+# Shared memory segments created by TweezerScheduler.__init__ that its stop()
+# method closes but never unlinks — leaving them alive between cycles on Windows.
+_SCHEDULER_SHM_NAMES = ["tweezer-rt-status"]
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _force_unlink_shm() -> None:
+    """Unlink shared memory segments that TweezerScheduler.stop() leaves open.
+
+    Called both before creating a new scheduler (crash recovery) and after
+    stop() returns (normal cleanup), so the segment is always gone before the
+    next TweezerScheduler.__init__ tries to create it with create=True.
+    """
+    for name in _SCHEDULER_SHM_NAMES:
+        try:
+            seg = _mp_shm.SharedMemory(name=name, create=False)
+            seg.close()
+            seg.unlink()
+            print(f"[cleanup] Unlinked leftover shared memory: {name!r}")
+        except FileNotFoundError:
+            pass  # already gone — nothing to do
 
 
 def _shift(params, freqDelta, freqScale):
@@ -119,6 +141,10 @@ class CalibrationSession:
         aod.add_array(rf_params_interlace, duration=1000, trigger=True, moving_flag=False)
         aod.add_array(rf_params_main,      duration=1000, trigger=True, moving_flag=False)
 
+        # Defensive: unlink any shared memory left by a previous crashed session
+        # before TweezerScheduler.__init__ tries to create it with create=True.
+        _force_unlink_shm()
+
         scheduler = ts.TweezerScheduler(awg, NUM_TWEEZERS, SCHEDULER_IP, SCHEDULER_PORT)
 
         # scheduler.run() is a blocking event loop — run it in a background thread
@@ -153,7 +179,7 @@ class CalibrationSession:
             # ── Unconditional AWG teardown ────────────────────────────────────
             # scheduler.stop() signals run_thread to exit, then we wait for it.
             for fn, label in [
-                (scheduler.stop, "scheduler.stop()"),   # signals run loop to exit + closes shared memory
+                (scheduler.stop, "scheduler.stop()"),   # signals run loop to exit + closes (but doesn't unlink) shm
                 (awg.stop_card,  "awg.stop_card()"),    # stops card playback
                 (awg.close_card, "awg.close_card()"),   # releases card handle
             ]:
@@ -161,6 +187,9 @@ class CalibrationSession:
                     fn()
                 except Exception as exc:
                     print(f"Warning: cleanup step '{label}' raised: {exc}")
+            # Unlink the shared memory that stop() only close()'d — fixes the
+            # "tweezer-rt-status already exists" error on the next cycle.
+            _force_unlink_shm()
             run_thread.join(timeout=5)
 
     def close(self) -> None:
