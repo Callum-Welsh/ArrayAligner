@@ -9,6 +9,7 @@ import math
 import pathlib
 import threading
 import tkinter as tk
+from datetime import date as _date
 from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
@@ -77,8 +78,16 @@ class GaussianFitApp(tk.Tk):
         self._autocal_corrections_var = tk.StringVar(value="")
         self._autocal_verification_var = tk.StringVar(value="")
         self._autocal_last_al: dict | None = None
-        self._autocal_output_dir: pathlib.Path = pathlib.Path(__file__).parent
-        self._autocal_dir_var = tk.StringVar(value=str(self._autocal_output_dir))
+        _today = _date.today()
+        _default_dir = (
+            f"C:/Users/Jiachen/Princeton Dropbox/Cheuk Lab/CaF/Data"
+            f"/{_today.year}/{_today.strftime('%B')}/{_today.strftime('%Y%m%d')}"
+        )
+        self._autocal_dir_var = tk.StringVar(value=_default_dir)
+        self._fn_interlace_start_var = tk.StringVar(value="interlace_start.tif")
+        self._fn_main_start_var      = tk.StringVar(value="main_start.tif")
+        self._fn_interlace_stop_var  = tk.StringVar(value="interlace_stop.tif")
+        self._fn_main_stop_var       = tk.StringVar(value="main_stop.tif")
         self._params_file = pathlib.Path(__file__).parent / "cal_params.json"
         self._params_delta_var = tk.StringVar(value="0.0")
         self._params_scale_var = tk.StringVar(value="0.0")
@@ -147,6 +156,23 @@ class GaussianFitApp(tk.Tk):
         dir_inner.pack(fill=tk.X, padx=8, pady=6)
         ttk.Entry(dir_inner, textvariable=self._autocal_dir_var, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(dir_inner, text="Browse…", command=self._autocal_browse_dir).pack(side=tk.LEFT, padx=(6, 0))
+
+        # ── File names ───────────────────────────────────────────────────────
+        fn_frame = ttk.LabelFrame(autocal_tab, text="File names")
+        fn_frame.pack(fill=tk.X, padx=12, pady=4)
+        fn_inner = ttk.Frame(fn_frame)
+        fn_inner.pack(fill=tk.X, padx=8, pady=6)
+
+        for label_text, var in [
+            ("Cycle 1 interlace:", self._fn_interlace_start_var),
+            ("Cycle 1 main:",      self._fn_main_start_var),
+            ("Cycle 2 interlace:", self._fn_interlace_stop_var),
+            ("Cycle 2 main:",      self._fn_main_stop_var),
+        ]:
+            row = ttk.Frame(fn_inner)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=label_text, width=20, anchor=tk.W).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=var, width=30).pack(side=tk.LEFT, padx=4)
 
         # ── Starting parameters (persistent, editable) ───────────────────────
         params_frame = ttk.LabelFrame(
@@ -1036,7 +1062,13 @@ class GaussianFitApp(tk.Tk):
             self._sign_flip_scale.get(),
             self._sign_flip_horiz.get(),
         )
-        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir, starting, sign_flips), daemon=True)
+        filenames = {
+            "interlace_start": self._fn_interlace_start_var.get(),
+            "main_start":      self._fn_main_start_var.get(),
+            "interlace_stop":  self._fn_interlace_stop_var.get(),
+            "main_stop":       self._fn_main_stop_var.get(),
+        }
+        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir, starting, sign_flips, filenames), daemon=True)
         thread.start()
         self.after(100, self._autocal_watch_completion)
 
@@ -1048,7 +1080,8 @@ class GaussianFitApp(tk.Tk):
             self._autocal_session.cancel()
 
     def _autocal_thread_fn(self, output_dir: pathlib.Path, starting: dict,
-                           sign_flips: tuple[bool, bool, bool]) -> None:
+                           sign_flips: tuple[bool, bool, bool],
+                           filenames: dict[str, str]) -> None:
         try:
             from autoCal import CalibrationParams, CalibrationSession
 
@@ -1061,12 +1094,14 @@ class GaussianFitApp(tk.Tk):
             ))
             session = CalibrationSession()
             self._autocal_session = session
-            session.run_cycle(starting_params, "start", output_dir)
+            session.run_cycle(starting_params, output_dir,
+                              interlace_name=filenames["interlace_start"],
+                              main_name=filenames["main_start"])
 
             fit1_done = threading.Event()
             self.after(0, lambda: self._autocal_load_fit_calibrate(
-                output_dir / "main_start.tif",
-                output_dir / "interlace_start.tif",
+                output_dir / filenames["main_start"],
+                output_dir / filenames["interlace_start"],
                 "Auto-Cal: Cycle 1 — fitting images...",
                 fit1_done,
             ))
@@ -1079,7 +1114,6 @@ class GaussianFitApp(tk.Tk):
             s_d = -1.0 if flip_delta else 1.0
             s_a = -1.0 if flip_scale else 1.0
             s_h = -1.0 if flip_horiz else 1.0
-            # New params = starting + (optionally inverted) residual δ from fitting
             new_params = CalibrationParams(
                 vertical_alignment_delta=starting_params.vertical_alignment_delta + s_d * al1["shift_y_rot"],
                 vertical_alignment_scale=starting_params.vertical_alignment_scale + s_a * al1["scale_a"],
@@ -1090,12 +1124,14 @@ class GaussianFitApp(tk.Tk):
             self.after(0, lambda: self._autocal_status_var.set(
                 "Auto-Cal: Cycle 2 — programming AWG with new parameters and capturing verification images..."
             ))
-            session.run_cycle(new_params, "stop", output_dir)
+            session.run_cycle(new_params, output_dir,
+                              interlace_name=filenames["interlace_stop"],
+                              main_name=filenames["main_stop"])
 
             fit2_done = threading.Event()
             self.after(0, lambda: self._autocal_load_fit_calibrate(
-                output_dir / "main_stop.tif",
-                output_dir / "interlace_stop.tif",
+                output_dir / filenames["main_stop"],
+                output_dir / filenames["interlace_stop"],
                 "Auto-Cal: Cycle 2 — fitting verification images...",
                 fit2_done,
             ))

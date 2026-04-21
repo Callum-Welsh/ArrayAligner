@@ -136,8 +136,10 @@ class CalibrationSession:
                     print("Warning: capture overran interval")
         return np.round(accumulator / num_shots).astype(original_dtype)
 
-    def run_cycle(self, params: CalibrationParams, phase: str,
-                  output_dir: Path = Path('.')) -> tuple[Path, Path]:
+    def run_cycle(self, params: CalibrationParams,
+                  output_dir: Path = Path('.'),
+                  interlace_name: str = "interlace.tif",
+                  main_name: str = "main.tif") -> tuple[Path, Path]:
         """Program AWG with params, capture images, release AWG, return paths.
 
         The AWG and scheduler are created at the start of this method and
@@ -170,7 +172,7 @@ class CalibrationSession:
         aod.add_array(rf_params_interlace, duration=1000, trigger=True, moving_flag=False)
         aod.add_array(rf_params_main,      duration=1000, trigger=True, moving_flag=False)
 
-        print(f"[autoCal] phase={phase!r}  "
+        print(f"[autoCal] interlace→{interlace_name}  main→{main_name}  "
               f"vertical_delta={params.vertical_alignment_delta:+.6f} MHz  "
               f"vertical_scale={params.vertical_alignment_scale:+.6f} MHz/tw  "
               f"horizontal_delta={params.horizontal_alignment_delta:+.6f} MHz  "
@@ -195,7 +197,7 @@ class CalibrationSession:
             print("Image Capture Running!")
 
             # Capture interlace image (AWG in interlace configuration)
-            interlace_path = output_dir / f'interlace_{phase}.tif'
+            interlace_path = output_dir / interlace_name
             img = self._capture_average()
             tifffile.imwrite(str(interlace_path), img)
             print(f"Saved {interlace_path}")
@@ -203,7 +205,7 @@ class CalibrationSession:
             awg.force_trigger()
 
             # Capture main image (AWG in main configuration)
-            main_path = output_dir / f'main_{phase}.tif'
+            main_path = output_dir / main_name
             img = self._capture_average()
             tifffile.imwrite(str(main_path), img)
             print(f"Saved {main_path}")
@@ -248,6 +250,8 @@ class CalibrationSession:
 if __name__ == '__main__':
     session = CalibrationSession()
     try:
-        session.run_cycle(CalibrationParams(), 'start')
+        session.run_cycle(CalibrationParams(),
+                          interlace_name="interlace_start.tif",
+                          main_name="main_start.tif")
     finally:
         session.close()
