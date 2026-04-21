@@ -35,11 +35,12 @@ _SCHEDULER_SHM_NAMES = ["tweezer-rt-status"]
 
 
 def _force_unlink_shm() -> None:
-    """Unlink shared memory segments that TweezerScheduler.stop() leaves open.
+    """Unlink shared memory segments on POSIX (no-op on Windows, but harmless).
 
-    Called both before creating a new scheduler (crash recovery) and after
-    stop() returns (normal cleanup), so the segment is always gone before the
-    next TweezerScheduler.__init__ tries to create it with create=True.
+    On Windows, unlink() does nothing — the OS destroys the segment only when
+    every handle is closed. Use _join_image_receiver() first to ensure all
+    subprocess handles are released before the next cycle tries to create it.
+    On Linux/macOS this removes the /dev/shm/ file directly.
     """
     for name in _SCHEDULER_SHM_NAMES:
         try:
@@ -49,6 +50,25 @@ def _force_unlink_shm() -> None:
             print(f"[cleanup] Unlinked leftover shared memory: {name!r}")
         except FileNotFoundError:
             pass  # already gone — nothing to do
+
+
+def _join_image_receiver(scheduler, timeout: float = 5.0) -> None:
+    """Wait for the ImageReceiver subprocess to exit and release its shm handle.
+
+    On Windows, unlink() is a no-op — the named mapping persists until EVERY
+    process closes its handle.  ImageReceiver is a separate Process that holds
+    its own handle; we must join() it after scheduler.stop() signals it to
+    exit, otherwise the mapping is still alive when the next cycle tries to
+    create it with create=True and Windows raises FileExistsError.
+    """
+    ir = getattr(scheduler, 'image_receiver', None)
+    if ir is None or not hasattr(ir, 'join'):
+        return
+    ir.join(timeout=timeout)
+    if ir.is_alive():
+        print("Warning: ImageReceiver did not exit within timeout — terminating")
+        ir.terminate()
+        ir.join(timeout=2)
 
 
 def _shift(params, freqDelta, freqScale):
@@ -178,18 +198,28 @@ class CalibrationSession:
         finally:
             # ── Unconditional AWG teardown ────────────────────────────────────
             # scheduler.stop() signals run_thread to exit, then we wait for it.
+            try:
+                scheduler.stop()          # sets stop_irq; closes (but doesn't unlink) shm handle
+            except Exception as exc:
+                print(f"Warning: scheduler.stop() raised: {exc}")
+
+            # Wait for ImageReceiver subprocess to exit and release its handle.
+            # On Windows this is the ONLY way to free the named mapping — unlink()
+            # is a no-op there, so the segment persists until all handles are closed.
+            _join_image_receiver(scheduler)
+
+            # POSIX: unlink the segment. Windows: no-op, but harmless.
+            _force_unlink_shm()
+
             for fn, label in [
-                (scheduler.stop, "scheduler.stop()"),   # signals run loop to exit + closes (but doesn't unlink) shm
-                (awg.stop_card,  "awg.stop_card()"),    # stops card playback
-                (awg.close_card, "awg.close_card()"),   # releases card handle
+                (awg.stop_card,  "awg.stop_card()"),
+                (awg.close_card, "awg.close_card()"),
             ]:
                 try:
                     fn()
                 except Exception as exc:
                     print(f"Warning: cleanup step '{label}' raised: {exc}")
-            # Unlink the shared memory that stop() only close()'d — fixes the
-            # "tweezer-rt-status already exists" error on the next cycle.
-            _force_unlink_shm()
+
             run_thread.join(timeout=5)
 
     def close(self) -> None:

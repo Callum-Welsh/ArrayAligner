@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 import pathlib
 import threading
@@ -72,12 +73,17 @@ class GaussianFitApp(tk.Tk):
         self._autocal_session = None  # CalibrationSession | None
         self._notebook: ttk.Notebook | None = None
         self._autocal_tab: ttk.Frame | None = None
-        self._autocal_status_var = tk.StringVar(value="Press Auto-Cal to begin. Each press resets parameters to zero.")
+        self._autocal_status_var = tk.StringVar(value="Press Auto-Cal to begin.")
         self._autocal_corrections_var = tk.StringVar(value="")
         self._autocal_verification_var = tk.StringVar(value="")
         self._autocal_last_al: dict | None = None
         self._autocal_output_dir: pathlib.Path = pathlib.Path(__file__).parent
         self._autocal_dir_var = tk.StringVar(value=str(self._autocal_output_dir))
+        self._params_file = pathlib.Path(__file__).parent / "cal_params.json"
+        self._params_delta_var = tk.StringVar(value="0.0")
+        self._params_scale_var = tk.StringVar(value="0.0")
+        self._params_horiz_var = tk.StringVar(value="0.0")
+        self._load_cal_params()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -139,6 +145,30 @@ class GaussianFitApp(tk.Tk):
         ttk.Entry(dir_inner, textvariable=self._autocal_dir_var, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(dir_inner, text="Browse…", command=self._autocal_browse_dir).pack(side=tk.LEFT, padx=(6, 0))
 
+        # ── Starting parameters (persistent, editable) ───────────────────────
+        params_frame = ttk.LabelFrame(
+            autocal_tab,
+            text="Starting parameters  (MHz)  —  loaded from file, saved after each calibration",
+        )
+        params_frame.pack(fill=tk.X, padx=12, pady=4)
+        params_inner = ttk.Frame(params_frame)
+        params_inner.pack(fill=tk.X, padx=8, pady=6)
+
+        for label_text, var in [
+            ("vertical_alignment_delta:", self._params_delta_var),
+            ("vertical_alignment_scale (MHz/tw):", self._params_scale_var),
+            ("horizontal_alignment_delta:", self._params_horiz_var),
+        ]:
+            row = ttk.Frame(params_inner)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=label_text, width=36, anchor=tk.W).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=var, width=14).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(
+            params_inner, text="Reset to zero",
+            command=self._autocal_reset_params,
+        ).pack(anchor=tk.W, pady=(6, 0))
+
         ttk.Label(
             autocal_tab,
             textvariable=self._autocal_status_var,
@@ -148,7 +178,7 @@ class GaussianFitApp(tk.Tk):
 
         corrections_frame = ttk.LabelFrame(
             autocal_tab,
-            text="Corrections applied  (Cycle 1 → Cycle 2, always from zero)",
+            text="New parameters  (applied in Cycle 2, saved to file)",
         )
         corrections_frame.pack(fill=tk.X, padx=12, pady=6)
         tk.Label(
@@ -983,7 +1013,21 @@ class GaussianFitApp(tk.Tk):
         if self._autocal_cancel_btn is not None:
             self._autocal_cancel_btn.config(state="normal")
         output_dir = pathlib.Path(self._autocal_dir_var.get())
-        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir,), daemon=True)
+        try:
+            starting = {
+                "vertical_alignment_delta": float(self._params_delta_var.get()),
+                "vertical_alignment_scale": float(self._params_scale_var.get()),
+                "horizontal_alignment_delta": float(self._params_horiz_var.get()),
+            }
+        except ValueError:
+            messagebox.showerror("Invalid parameters", "Starting parameters must all be numbers.")
+            self._autocal_running = False
+            if self._autocal_btn is not None:
+                self._autocal_btn.config(state="normal")
+            if self._autocal_cancel_btn is not None:
+                self._autocal_cancel_btn.config(state="disabled")
+            return
+        thread = threading.Thread(target=self._autocal_thread_fn, args=(output_dir, starting), daemon=True)
         thread.start()
         self.after(100, self._autocal_watch_completion)
 
@@ -994,19 +1038,20 @@ class GaussianFitApp(tk.Tk):
         if self._autocal_session is not None:
             self._autocal_session.cancel()
 
-    def _autocal_thread_fn(self, output_dir: pathlib.Path) -> None:
+    def _autocal_thread_fn(self, output_dir: pathlib.Path, starting: dict) -> None:
         try:
             from autoCal import CalibrationParams, CalibrationSession
 
-            # ── Cycle 1: zero params ─────────────────────────────────────────
+            starting_params = CalibrationParams(**starting)
+
+            # ── Cycle 1: starting params ──────────────────────────────────────
             self.after(0, lambda: self._autocal_status_var.set(
-                "Auto-Cal: Cycle 1 — programming AWG with zero parameters and capturing images..."
+                "Auto-Cal: Cycle 1 — programming AWG with starting parameters and capturing images..."
             ))
             session = CalibrationSession()
             self._autocal_session = session
-            session.run_cycle(CalibrationParams(), "start", output_dir)
+            session.run_cycle(starting_params, "start", output_dir)
 
-            # Fit cycle-1 images on GUI thread and compute alignment
             fit1_done = threading.Event()
             self.after(0, lambda: self._autocal_load_fit_calibrate(
                 output_dir / "main_start.tif",
@@ -1020,23 +1065,18 @@ class GaussianFitApp(tk.Tk):
                 raise RuntimeError("Cycle-1 alignment computation failed — check fit parameters and index settings.")
 
             al1 = self._autocal_last_al
-            u = al1["units"]
-            corrections = CalibrationParams(
-                vertical_alignment_delta=al1["shift_y_rot"],
-                vertical_alignment_scale=al1["scale_a"],
-                horizontal_alignment_delta=al1["shift_x_rot"],
+            # New params = starting + residual δ from fitting
+            new_params = CalibrationParams(
+                vertical_alignment_delta=starting_params.vertical_alignment_delta + al1["shift_y_rot"],
+                vertical_alignment_scale=starting_params.vertical_alignment_scale + al1["scale_a"],
+                horizontal_alignment_delta=starting_params.horizontal_alignment_delta + al1["shift_x_rot"],
             )
-            self.after(0, lambda c=corrections, units=u: self._autocal_corrections_var.set(
-                f"  Δ vertical  (vertical_alignment_delta)  =  {c.vertical_alignment_delta:+.6f}  {units}\n\n"
-                f"  Δ scale     (vertical_alignment_scale)  =  {c.vertical_alignment_scale:+.6f}  {units} / tweezer\n\n"
-                f"  Δ horizontal (horizontal_alignment_delta) =  {c.horizontal_alignment_delta:+.6f}  {units}"
-            ))
 
-            # ── Cycle 2: corrected params (verification) ─────────────────────
+            # ── Cycle 2: new params (verification) ───────────────────────────
             self.after(0, lambda: self._autocal_status_var.set(
-                "Auto-Cal: Cycle 2 — programming AWG with corrections and capturing verification images..."
+                "Auto-Cal: Cycle 2 — programming AWG with new parameters and capturing verification images..."
             ))
-            session.run_cycle(corrections, "stop", output_dir)
+            session.run_cycle(new_params, "stop", output_dir)
 
             fit2_done = threading.Event()
             self.after(0, lambda: self._autocal_load_fit_calibrate(
@@ -1051,13 +1091,7 @@ class GaussianFitApp(tk.Tk):
                 raise RuntimeError("Cycle-2 verification alignment computation failed.")
 
             al2 = self._autocal_last_al
-            u2 = al2["units"]
-            self.after(0, lambda a=al2, units=u2: self._autocal_verification_var.set(
-                f"  Δ vertical  =  {a['shift_y_rot']:+.6f}  {units}\n\n"
-                f"  Δ scale     =  {a['scale_a']:+.6f}  {units} / tweezer\n\n"
-                f"  Δ horizontal =  {a['shift_x_rot']:+.6f}  {units}"
-            ))
-            self.after(0, self._autocal_finish_ui)
+            self.after(0, lambda p=new_params, a=al2: self._autocal_complete(p, a))
 
         except InterruptedError:
             self.after(0, lambda: self._autocal_status_var.set(
@@ -1157,12 +1191,61 @@ class GaussianFitApp(tk.Tk):
         if self._autocal_cancel_btn is not None:
             self._autocal_cancel_btn.config(state="disabled")
 
-    def _autocal_finish_ui(self) -> None:
+    def _autocal_complete(self, new_params, al2: dict) -> None:
+        """Called on the main thread after both cycles finish successfully."""
+        u = al2["units"]
+        self._autocal_corrections_var.set(
+            f"  vertical_alignment_delta   =  {new_params.vertical_alignment_delta:+.6f}  {u}\n\n"
+            f"  vertical_alignment_scale   =  {new_params.vertical_alignment_scale:+.6f}  {u} / tweezer\n\n"
+            f"  horizontal_alignment_delta =  {new_params.horizontal_alignment_delta:+.6f}  {u}"
+        )
+        self._autocal_verification_var.set(
+            f"  Δ vertical   =  {al2['shift_y_rot']:+.6f}  {u}\n\n"
+            f"  Δ scale      =  {al2['scale_a']:+.6f}  {u} / tweezer\n\n"
+            f"  Δ horizontal =  {al2['shift_x_rot']:+.6f}  {u}"
+        )
+        # Persist and reflect new params in the editable fields
+        self._params_delta_var.set(f"{new_params.vertical_alignment_delta:.6f}")
+        self._params_scale_var.set(f"{new_params.vertical_alignment_scale:.6f}")
+        self._params_horiz_var.set(f"{new_params.horizontal_alignment_delta:.6f}")
+        self._save_cal_params(new_params)
         self._autocal_status_var.set(
-            "Auto-Cal complete. Verification images loaded — use Images / Overlap / Results tabs to evaluate."
+            "Auto-Cal complete. New parameters saved — next calibration will start from these values."
         )
         if self._notebook is not None:
-            self._notebook.select(0)  # switch to Images tab
+            self._notebook.select(0)
+
+    def _load_cal_params(self) -> None:
+        """Load persistent calibration parameters from JSON into the StringVars."""
+        try:
+            data = json.loads(self._params_file.read_text())
+            self._params_delta_var.set(str(data.get("vertical_alignment_delta", 0.0)))
+            self._params_scale_var.set(str(data.get("vertical_alignment_scale", 0.0)))
+            self._params_horiz_var.set(str(data.get("horizontal_alignment_delta", 0.0)))
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass  # file missing or corrupt — leave defaults
+
+    def _save_cal_params(self, params) -> None:
+        """Write calibration parameters to JSON for the next session."""
+        data = {
+            "vertical_alignment_delta":   params.vertical_alignment_delta,
+            "vertical_alignment_scale":   params.vertical_alignment_scale,
+            "horizontal_alignment_delta": params.horizontal_alignment_delta,
+        }
+        try:
+            self._params_file.write_text(json.dumps(data, indent=2))
+        except OSError as exc:
+            messagebox.showwarning("Save failed", f"Could not save calibration parameters:\n{exc}")
+
+    def _autocal_reset_params(self) -> None:
+        """Reset starting parameters to zero and remove the saved file."""
+        self._params_delta_var.set("0.0")
+        self._params_scale_var.set("0.0")
+        self._params_horiz_var.set("0.0")
+        try:
+            self._params_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _autocal_browse_dir(self) -> None:
         chosen = filedialog.askdirectory(
