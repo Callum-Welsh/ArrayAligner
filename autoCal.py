@@ -18,6 +18,11 @@ class CalibrationParams:
     vertical_alignment_scale: float = 0.0
     horizontal_alignment_delta: float = 0.0
 
+    def __post_init__(self) -> None:
+        self.vertical_alignment_delta  = round(self.vertical_alignment_delta,  3)
+        self.vertical_alignment_scale  = round(self.vertical_alignment_scale,  3)
+        self.horizontal_alignment_delta = round(self.horizontal_alignment_delta, 3)
+
 
 # ── AWG / scheduler parameters ───────────────────────────────────────────────
 _MERGE_DISTANCE = 0.5
