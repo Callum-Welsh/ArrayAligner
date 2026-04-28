@@ -178,16 +178,17 @@ class CalibrationSession:
             params.vertical_alignment_scale,
         )
         int_10_horizontal     = _shift(
-            ti.generate_rf_params(np.array([32.5 * 200]), np.array([100]), np.array([0])),
+            ti.generate_rf_params(np.array([32.5 * 500]), np.array([100]), np.array([0])),
             params.horizontal_alignment_delta,
             0,
         )
-        int_10_horizontal_off = ti.generate_rf_params(np.array([32.5 * 200]), np.array([100]), np.array([0]))
+        int_10_horizontal_off = ti.generate_rf_params(np.array([0]), np.array([100]), np.array([0]))
         main_10_merge         = _shift(self._main_10, -0.5, 0)
         main_10_horizontal    = ti.generate_rf_params(np.array([32.5 * 100]), np.array([100]), np.array([0]))
         main_10_horizontal_off = ti.generate_rf_params(np.array([0]),         np.array([100]), np.array([0]))
 
-        rf_params_interlace = [int_10_merge, int_10_horizontal,     main_10_merge, main_10_horizontal_off]
+
+        rf_params_interlace = [int_10_merge, int_10_horizontal, main_10_merge, main_10_horizontal_off]
         rf_params_main      = [int_10_merge, int_10_horizontal_off, main_10_merge, main_10_horizontal]
 
         # ── Fresh AWG initialisation for this cycle ───────────────────────────
@@ -228,6 +229,8 @@ class CalibrationSession:
             print(f"Saved {interlace_path}")
 
             awg.force_trigger()
+
+            time.sleep(1)
 
             # Capture main image (AWG in main configuration)
             main_path = output_dir / main_name
