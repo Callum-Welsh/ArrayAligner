@@ -11,6 +11,7 @@ from tweezer.logger import Logger
 from dataclasses import dataclass
 import tifffile
 import gc
+import EasyMCP2221
 
 
 @dataclass
@@ -119,6 +120,7 @@ class CalibrationSession:
 
     def __init__(self):
         self._cancel = threading.Event()
+
 
         log = Logger()
         self._int_10  = log.load_rf_config("2026-1-30-int_10_4MHz")

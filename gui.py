@@ -24,6 +24,57 @@ from PIL import Image, ImageTk
 from fit_gaussians import compute_alignment, draw_crosses_on_image, elliptical_gaussian, ensure_2d, fit_image_array
 
 
+class MirrorController:
+    """Controls the flip mirror via an MCP2221 GPIO device (gp0, active-high = mirror up)."""
+
+    def __init__(self) -> None:
+        self._dev = None
+        self._is_up: bool = False
+        self._connect()
+
+    def _connect(self) -> bool:
+        try:
+            import EasyMCP2221
+            dev = EasyMCP2221.Device()
+            dev.set_pin_function(gp0="GPIO_OUT")
+            dev.GPIO_write(gp0=False)
+            self._dev = dev
+            self._is_up = False
+            return True
+        except Exception as exc:
+            print(f"[mirror] MCP2221 not available: {exc}")
+            self._dev = None
+            return False
+
+    @property
+    def connected(self) -> bool:
+        return self._dev is not None
+
+    @property
+    def is_up(self) -> bool:
+        return self._is_up
+
+    def set(self, up: bool) -> None:
+        if self._dev is None:
+            raise RuntimeError("Mirror device not connected.")
+        self._dev.GPIO_write(gp0=up)
+        self._is_up = up
+
+    def reconnect(self) -> bool:
+        self.close()
+        return self._connect()
+
+    def close(self) -> None:
+        if self._dev is not None:
+            try:
+                self._dev.GPIO_write(gp0=False)
+                self._dev.close()
+            except Exception:
+                pass
+            self._dev = None
+        self._is_up = False
+
+
 class GaussianFitApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -98,6 +149,14 @@ class GaussianFitApp(tk.Tk):
         self._suffix_spinbox: tk.Spinbox | None = None
         self._suffix_autofill_var = tk.BooleanVar(value=False)
         self._suffix_autofill_var.trace_add("write", self._on_autofill_changed)
+        # ── Flip mirror state ─────────────────────────────────────────────────
+        self._mirror: MirrorController | None = None
+        self._mirror_state_var = tk.StringVar(value="Disconnected")
+        self._mirror_canvas: tk.Canvas | None = None
+        self._mirror_oval: int | None = None
+        self._mirror_toggle_btn: ttk.Button | None = None
+        self._init_mirror()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._params_file = pathlib.Path(__file__).parent / "cal_params.json"
         self._params_delta_var = tk.StringVar(value="0.0")
         self._params_scale_var = tk.StringVar(value="0.0")
@@ -204,6 +263,21 @@ class GaussianFitApp(tk.Tk):
         self._suffix_spinbox = tk.Spinbox(sfx_ctrl_row, from_=0, to=0, textvariable=self._suffix_index_var, width=5, state="disabled")
         self._suffix_spinbox.pack(side=tk.LEFT)
         ttk.Label(sfx_ctrl_row, textvariable=self._suffix_preview_var, foreground="gray40").pack(side=tk.LEFT, padx=(16, 0))
+
+        # ── Flip mirror (MCP2221) ─────────────────────────────────────────────
+        mirror_frame = ttk.LabelFrame(autocal_tab, text="Flip Mirror (MCP2221 gp0)")
+        mirror_frame.pack(fill=tk.X, padx=12, pady=4)
+        mirror_inner = ttk.Frame(mirror_frame)
+        mirror_inner.pack(fill=tk.X, padx=8, pady=8)
+
+        self._mirror_canvas = tk.Canvas(mirror_inner, width=18, height=18, highlightthickness=0)
+        self._mirror_oval = self._mirror_canvas.create_oval(2, 2, 16, 16, fill="red", outline="")
+        self._mirror_canvas.pack(side=tk.LEFT)
+        ttk.Label(mirror_inner, textvariable=self._mirror_state_var, width=18, anchor=tk.W).pack(side=tk.LEFT, padx=(6, 0))
+        self._mirror_toggle_btn = ttk.Button(mirror_inner, text="Flip Up", command=self._toggle_mirror)
+        self._mirror_toggle_btn.pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Button(mirror_inner, text="Reconnect", command=self._reconnect_mirror).pack(side=tk.LEFT, padx=4)
+        self._update_mirror_indicator()
 
         # ── Starting parameters (persistent, editable) ───────────────────────
         params_frame = ttk.LabelFrame(
@@ -1135,6 +1209,23 @@ class GaussianFitApp(tk.Tk):
             session = CalibrationSession()
             self._autocal_session = session
 
+            # ── Flip mirror up and let it settle ──────────────────────────────
+            _MIRROR_SETTLE_S = 5
+            if self._mirror is not None and self._mirror.connected:
+                self.after(0, lambda: self._autocal_status_var.set(
+                    f"Auto-Cal: flipping mirror up — waiting {_MIRROR_SETTLE_S} s to settle…"
+                ))
+                self._mirror.set(True)
+                self.after(0, self._update_mirror_indicator)
+                for i in range(_MIRROR_SETTLE_S * 10):
+                    if session._cancel.is_set():
+                        raise InterruptedError("Calibration cancelled by user")
+                    time.sleep(0.1)
+            else:
+                self.after(0, lambda: self._autocal_status_var.set(
+                    "Auto-Cal: mirror device not connected — proceeding without mirror control."
+                ))
+
             def _one_pass(params_in: "CalibrationParams", pass_label: str) -> "CalibrationParams":
                 """Run one full correction pass (two hardware cycles).
 
@@ -1230,6 +1321,13 @@ class GaussianFitApp(tk.Tk):
             if self._autocal_session is not None:
                 self._autocal_session.close()
                 self._autocal_session = None
+            # Always put mirror down, regardless of success/cancel/error.
+            if self._mirror is not None and self._mirror.connected:
+                try:
+                    self._mirror.set(False)
+                    self.after(0, self._update_mirror_indicator)
+                except Exception as exc:
+                    print(f"Warning: mirror down failed: {exc}")
             self._autocal_running = False  # watcher on main thread re-enables buttons
 
     def _autocal_load_fit_calibrate(
@@ -1454,6 +1552,56 @@ class GaussianFitApp(tk.Tk):
             return
         idx = (self._suffix_index_var.get() + 1) % len(self._suffix_list)
         self._suffix_index_var.set(idx)
+
+    def _init_mirror(self) -> None:
+        self._mirror = MirrorController()
+        if not self._mirror.connected:
+            self._mirror = None
+
+    def _update_mirror_indicator(self) -> None:
+        if self._mirror_canvas is None or self._mirror_oval is None:
+            return
+        if self._mirror is None or not self._mirror.connected:
+            color, state, btn = "red", "Disconnected", "Flip Up"
+        elif self._mirror.is_up:
+            color, state, btn = "#22cc22", "UP  (5 V)", "Flip Down"
+        else:
+            color, state, btn = "#888888", "DOWN  (0 V)", "Flip Up"
+        self._mirror_canvas.itemconfig(self._mirror_oval, fill=color)
+        self._mirror_state_var.set(state)
+        if self._mirror_toggle_btn is not None:
+            self._mirror_toggle_btn.config(text=btn)
+
+    def _toggle_mirror(self) -> None:
+        if self._mirror is None or not self._mirror.connected:
+            messagebox.showwarning("Mirror", "MCP2221 device not connected. Use Reconnect to retry.")
+            return
+        try:
+            self._mirror.set(not self._mirror.is_up)
+            self._update_mirror_indicator()
+        except Exception as exc:
+            messagebox.showerror("Mirror error", str(exc))
+            self._update_mirror_indicator()
+
+    def _reconnect_mirror(self) -> None:
+        if self._mirror is None:
+            self._mirror = MirrorController()
+            if not self._mirror.connected:
+                self._mirror = None
+        else:
+            ok = self._mirror.reconnect()
+            if not ok:
+                self._mirror = None
+        self._update_mirror_indicator()
+        if self._mirror is None or not self._mirror.connected:
+            messagebox.showwarning("Mirror", "Could not connect to MCP2221 device.")
+        else:
+            messagebox.showinfo("Mirror", "MCP2221 connected.")
+
+    def _on_close(self) -> None:
+        if self._mirror is not None:
+            self._mirror.close()
+        self.destroy()
 
     def _autocal_browse_dir(self) -> None:
         chosen = filedialog.askdirectory(
