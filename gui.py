@@ -8,6 +8,7 @@ import json
 import math
 import pathlib
 import threading
+import time
 import tkinter as tk
 from datetime import date as _date
 from tkinter import filedialog, messagebox, ttk
