@@ -10,6 +10,7 @@ import tweezer.interface as ti
 from tweezer.logger import Logger
 from dataclasses import dataclass
 import tifffile
+import gc
 
 
 @dataclass
@@ -76,6 +77,28 @@ def _join_image_receiver(scheduler, timeout: float = 5.0) -> None:
         ir.join(timeout=2)
 
 
+def _close_image_receiver_socket(scheduler) -> None:
+    """Close the UDP socket that ImageReceiver bound in the parent process.
+
+    ImageReceiver.__init__ creates and binds self.sc in the parent process
+    before start() forks/spawns the child.  After the child exits its copy
+    of the fd is released, but the parent's original fd remains open and
+    holds the port until the entire process exits.  Closing it here lets
+    other software reclaim the port immediately after each calibration cycle.
+    """
+    ir = getattr(scheduler, 'image_receiver', None)
+    if ir is None:
+        return
+    sc = getattr(ir, 'sc', None)
+    if sc is None:
+        return
+    try:
+        sc.close()
+        print("[cleanup] Closed ImageReceiver UDP socket in parent process")
+    except Exception as exc:
+        print(f"Warning: ImageReceiver socket close raised: {exc}")
+
+
 def _shift(params, freqDelta, freqScale):
     p = params.copy()
     for k in range(len(p[:, 1])):
@@ -102,6 +125,8 @@ class CalibrationSession:
         self._main_10 = log.load_rf_config("2026-02-02-main_4MHz_10_corrected")
 
         # Camera stays alive for the full calibration session
+
+    
         instruments = uc480.list_instruments()
         print(instruments)
         self._cam = uc480.UC480_Camera(instruments[0])
@@ -225,6 +250,13 @@ class CalibrationSession:
             # is a no-op there, so the segment persists until all handles are closed.
             _join_image_receiver(scheduler)
 
+            # ImageReceiver.__init__ binds the UDP socket in the parent process
+            # before spawning the child.  The child gets its own copy of the fd,
+            # but the parent's original fd is never closed by scheduler.stop() or
+            # any other cleanup path — it would otherwise stay open (blocking the
+            # port for other software) until the entire Python process exits.
+            _close_image_receiver_socket(scheduler)
+
             # POSIX: unlink the segment. Windows: no-op, but harmless.
             _force_unlink_shm()
 
@@ -245,6 +277,10 @@ class CalibrationSession:
             self._cam.close()
         except Exception:
             pass
+        finally:
+            self._cam = None
+            gc.collect()
+
 
 
 if __name__ == '__main__':

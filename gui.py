@@ -88,6 +88,15 @@ class GaussianFitApp(tk.Tk):
         self._fn_main_start_var      = tk.StringVar(value="main_start.tif")
         self._fn_interlace_stop_var  = tk.StringVar(value="interlace_stop.tif")
         self._fn_main_stop_var       = tk.StringVar(value="main_stop.tif")
+        # ── Suffix rotation state ─────────────────────────────────────────────
+        self._suffix_list: list[str] = []
+        self._suffix_base_names: dict[str, str] | None = None
+        self._suffix_index_var = tk.IntVar(value=0)
+        self._suffix_file_var = tk.StringVar(value="")
+        self._suffix_preview_var = tk.StringVar(value="No suffixes loaded.")
+        self._suffix_spinbox: tk.Spinbox | None = None
+        self._suffix_autofill_var = tk.BooleanVar(value=False)
+        self._suffix_autofill_var.trace_add("write", self._on_autofill_changed)
         self._params_file = pathlib.Path(__file__).parent / "cal_params.json"
         self._params_delta_var = tk.StringVar(value="0.0")
         self._params_scale_var = tk.StringVar(value="0.0")
@@ -173,6 +182,27 @@ class GaussianFitApp(tk.Tk):
             row.pack(fill=tk.X, pady=1)
             ttk.Label(row, text=label_text, width=20, anchor=tk.W).pack(side=tk.LEFT)
             ttk.Entry(row, textvariable=var, width=30).pack(side=tk.LEFT, padx=4)
+
+        # ── File name suffix rotation ─────────────────────────────────────────
+        sfx_frame = ttk.LabelFrame(autocal_tab, text="File name suffix rotation")
+        sfx_frame.pack(fill=tk.X, padx=12, pady=4)
+        sfx_inner = ttk.Frame(sfx_frame)
+        sfx_inner.pack(fill=tk.X, padx=8, pady=6)
+
+        sfx_file_row = ttk.Frame(sfx_inner)
+        sfx_file_row.pack(fill=tk.X, pady=2)
+        ttk.Label(sfx_file_row, text="Suffix list file:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Entry(sfx_file_row, textvariable=self._suffix_file_var, width=38).pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
+        ttk.Button(sfx_file_row, text="Browse…", command=self._browse_suffix_file).pack(side=tk.LEFT, padx=4)
+        ttk.Button(sfx_file_row, text="Load", command=self._load_suffix_file).pack(side=tk.LEFT, padx=(0, 4))
+
+        sfx_ctrl_row = ttk.Frame(sfx_inner)
+        sfx_ctrl_row.pack(fill=tk.X, pady=4)
+        ttk.Checkbutton(sfx_ctrl_row, text="Auto-populate file names", variable=self._suffix_autofill_var).pack(side=tk.LEFT)
+        ttk.Label(sfx_ctrl_row, text="Current index:").pack(side=tk.LEFT, padx=(16, 4))
+        self._suffix_spinbox = tk.Spinbox(sfx_ctrl_row, from_=0, to=0, textvariable=self._suffix_index_var, width=5, state="disabled")
+        self._suffix_spinbox.pack(side=tk.LEFT)
+        ttk.Label(sfx_ctrl_row, textvariable=self._suffix_preview_var, foreground="gray40").pack(side=tk.LEFT, padx=(16, 0))
 
         # ── Starting parameters (persistent, editable) ───────────────────────
         params_frame = ttk.LabelFrame(
@@ -1042,6 +1072,16 @@ class GaussianFitApp(tk.Tk):
             self._autocal_btn.config(state="disabled")
         if self._autocal_cancel_btn is not None:
             self._autocal_cancel_btn.config(state="normal")
+        if self._suffix_autofill_var.get():
+            if not self._suffix_list:
+                messagebox.showwarning("No suffixes", "Auto-populate is enabled but no suffix list is loaded.")
+                self._autocal_running = False
+                if self._autocal_btn is not None:
+                    self._autocal_btn.config(state="normal")
+                if self._autocal_cancel_btn is not None:
+                    self._autocal_cancel_btn.config(state="disabled")
+                return
+            self._apply_suffix_to_filenames()
         output_dir = pathlib.Path(self._autocal_dir_var.get())
         try:
             starting = {
@@ -1087,61 +1127,93 @@ class GaussianFitApp(tk.Tk):
 
             starting_params = CalibrationParams(**starting)
             flip_delta, flip_scale, flip_horiz = sign_flips
-
-            # ── Cycle 1: starting params ──────────────────────────────────────
-            self.after(0, lambda: self._autocal_status_var.set(
-                "Auto-Cal: Cycle 1 — programming AWG with starting parameters and capturing images..."
-            ))
-            session = CalibrationSession()
-            self._autocal_session = session
-            session.run_cycle(starting_params, output_dir,
-                              interlace_name=filenames["interlace_start"],
-                              main_name=filenames["main_start"])
-
-            fit1_done = threading.Event()
-            self.after(0, lambda: self._autocal_load_fit_calibrate(
-                output_dir / filenames["main_start"],
-                output_dir / filenames["interlace_start"],
-                "Auto-Cal: Cycle 1 — fitting images...",
-                fit1_done,
-            ))
-            fit1_done.wait()
-
-            if self._autocal_last_al is None:
-                raise RuntimeError("Cycle-1 alignment computation failed — check fit parameters and index settings.")
-
-            al1 = self._autocal_last_al
             s_d = -1.0 if flip_delta else 1.0
             s_a = -1.0 if flip_scale else 1.0
             s_h = -1.0 if flip_horiz else 1.0
-            new_params = CalibrationParams(
-                vertical_alignment_delta=starting_params.vertical_alignment_delta + s_d * al1["shift_y_rot"],
-                vertical_alignment_scale=starting_params.vertical_alignment_scale + s_a * al1["scale_a"],
-                horizontal_alignment_delta=starting_params.horizontal_alignment_delta + s_h * al1["shift_x_rot"],
-            )
 
-            # ── Cycle 2: new params (verification) ───────────────────────────
-            self.after(0, lambda: self._autocal_status_var.set(
-                "Auto-Cal: Cycle 2 — programming AWG with new parameters and capturing verification images..."
-            ))
-            session.run_cycle(new_params, output_dir,
-                              interlace_name=filenames["interlace_stop"],
-                              main_name=filenames["main_stop"])
+            session = CalibrationSession()
+            self._autocal_session = session
 
-            fit2_done = threading.Event()
-            self.after(0, lambda: self._autocal_load_fit_calibrate(
-                output_dir / filenames["main_stop"],
-                output_dir / filenames["interlace_stop"],
-                "Auto-Cal: Cycle 2 — fitting verification images...",
-                fit2_done,
-            ))
-            fit2_done.wait()
+            def _one_pass(params_in: "CalibrationParams", pass_label: str) -> "CalibrationParams":
+                """Run one full correction pass (two hardware cycles).
 
-            if self._autocal_last_al is None:
-                raise RuntimeError("Cycle-2 verification alignment computation failed.")
+                Cycle 1 captures with params_in, fits, and computes corrected params.
+                Cycle 2 captures with corrected params for verification.
+                Returns the corrected CalibrationParams; leaves self._autocal_last_al
+                set to the cycle-2 (verification) alignment dict.
+                """
+                # ── Cycle 1: capture with current params ─────────────────────
+                self.after(0, lambda: self._autocal_status_var.set(
+                    f"Auto-Cal: {pass_label} — Cycle 1 — programming AWG and capturing images..."
+                ))
+                session.run_cycle(params_in, output_dir,
+                                  interlace_name=filenames["interlace_start"],
+                                  main_name=filenames["main_start"])
 
-            al2 = self._autocal_last_al
-            self.after(0, lambda p=new_params, a=al2: self._autocal_complete(p, a))
+                fit_a_done = threading.Event()
+                self.after(0, lambda: self._autocal_load_fit_calibrate(
+                    output_dir / filenames["main_start"],
+                    output_dir / filenames["interlace_start"],
+                    f"Auto-Cal: {pass_label} — Cycle 1 — fitting images...",
+                    fit_a_done,
+                ))
+                fit_a_done.wait()
+
+                if self._autocal_last_al is None:
+                    raise RuntimeError(
+                        f"{pass_label} Cycle-1 alignment failed — check fit parameters and index settings."
+                    )
+
+                al_a = self._autocal_last_al
+                params_out = CalibrationParams(
+                    vertical_alignment_delta=params_in.vertical_alignment_delta + s_d * al_a["shift_y_rot"],
+                    vertical_alignment_scale=params_in.vertical_alignment_scale + s_a * al_a["scale_a"],
+                    horizontal_alignment_delta=params_in.horizontal_alignment_delta + s_h * al_a["shift_x_rot"],
+                )
+
+                # ── Cycle 2: capture with corrected params (verification) ─────
+                self.after(0, lambda: self._autocal_status_var.set(
+                    f"Auto-Cal: {pass_label} — Cycle 2 — programming AWG with corrected parameters..."
+                ))
+                session.run_cycle(params_out, output_dir,
+                                  interlace_name=filenames["interlace_stop"],
+                                  main_name=filenames["main_stop"])
+
+                fit_b_done = threading.Event()
+                self.after(0, lambda: self._autocal_load_fit_calibrate(
+                    output_dir / filenames["main_stop"],
+                    output_dir / filenames["interlace_stop"],
+                    f"Auto-Cal: {pass_label} — Cycle 2 — fitting verification images...",
+                    fit_b_done,
+                ))
+                fit_b_done.wait()
+
+                if self._autocal_last_al is None:
+                    raise RuntimeError(f"{pass_label} Cycle-2 verification alignment failed.")
+
+                return params_out
+
+            # ── Pass 1 ────────────────────────────────────────────────────────
+            params_after_pass1 = _one_pass(starting_params, "Pass 1/2")
+
+            # ── 15-second inter-pass wait (cancellable, 1-second granularity) ─
+            _WAIT_SECONDS = 15
+            for i in range(_WAIT_SECONDS * 10):
+                if session._cancel.is_set():
+                    raise InterruptedError("Calibration cancelled by user")
+                time.sleep(0.1)
+                if i % 10 == 0:
+                    remaining = _WAIT_SECONDS - i // 10
+                    self.after(0, lambda r=remaining: self._autocal_status_var.set(
+                        f"Auto-Cal: Pass 1/2 complete — waiting {r} s before pass 2…"
+                    ))
+
+            # ── Pass 2 (starting from pass-1 result) ──────────────────────────
+            params_final = _one_pass(params_after_pass1, "Pass 2/2")
+
+            al_final = self._autocal_last_al
+            # _autocal_complete saves JSON and advances suffix index exactly once.
+            self.after(0, lambda p=params_final, a=al_final: self._autocal_complete(p, a))
 
         except InterruptedError:
             self.after(0, lambda: self._autocal_status_var.set(
@@ -1262,6 +1334,7 @@ class GaussianFitApp(tk.Tk):
         self._autocal_status_var.set(
             "Auto-Cal complete. New parameters saved — next calibration will start from these values."
         )
+        self._advance_suffix_index()
         if self._notebook is not None:
             self._notebook.select(0)
 
@@ -1296,6 +1369,90 @@ class GaussianFitApp(tk.Tk):
             self._params_file.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def _on_autofill_changed(self, *_) -> None:
+        if self._suffix_autofill_var.get():
+            if self._suffix_list:
+                self._suffix_base_names = self._snapshot_stems()
+        else:
+            if self._suffix_base_names is not None:
+                self._fn_interlace_start_var.set(self._suffix_base_names["interlace_start"] + ".tif")
+                self._fn_main_start_var.set(self._suffix_base_names["main_start"] + ".tif")
+                self._fn_interlace_stop_var.set(self._suffix_base_names["interlace_stop"] + ".tif")
+                self._fn_main_stop_var.set(self._suffix_base_names["main_stop"] + ".tif")
+                self._suffix_base_names = None
+
+    def _snapshot_stems(self) -> dict[str, str]:
+        return {
+            "interlace_start": pathlib.Path(self._fn_interlace_start_var.get()).stem,
+            "main_start":      pathlib.Path(self._fn_main_start_var.get()).stem,
+            "interlace_stop":  pathlib.Path(self._fn_interlace_stop_var.get()).stem,
+            "main_stop":       pathlib.Path(self._fn_main_stop_var.get()).stem,
+        }
+
+    def _browse_suffix_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select suffix list file",
+            filetypes=[("JSON", "*.json"), ("Text", "*.txt"), ("All files", "*")],
+        )
+        if path:
+            self._suffix_file_var.set(path)
+            self._load_suffix_file()
+
+    def _load_suffix_file(self) -> None:
+        path_str = self._suffix_file_var.get().strip()
+        if not path_str:
+            messagebox.showwarning("No file", "Enter or browse for a suffix list file.")
+            return
+        try:
+            text = pathlib.Path(path_str).read_text()
+        except OSError as exc:
+            messagebox.showerror("Failed to load suffix file", str(exc))
+            return
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                suffixes = [str(s) for s in parsed]
+            elif isinstance(parsed, dict) and "suffixes" in parsed:
+                suffixes = [str(s) for s in parsed["suffixes"]]
+            else:
+                raise ValueError("JSON must be an array or an object with a 'suffixes' key")
+        except json.JSONDecodeError:
+            parts = [s.strip() for s in text.replace("\n", ",").split(",")]
+            suffixes = [s for s in parts if s]
+
+        if not suffixes:
+            messagebox.showwarning("Empty list", "The suffix file contains no entries.")
+            return
+
+        self._suffix_list = suffixes
+        self._suffix_index_var.set(0)
+        if self._suffix_spinbox is not None:
+            self._suffix_spinbox.config(to=max(0, len(suffixes) - 1), state="normal")
+        if self._suffix_autofill_var.get():
+            self._suffix_base_names = self._snapshot_stems()
+        preview = ", ".join(suffixes[:10])
+        if len(suffixes) > 10:
+            preview += f"  … ({len(suffixes)} total)"
+        self._suffix_preview_var.set(preview)
+
+    def _apply_suffix_to_filenames(self) -> None:
+        if not self._suffix_list:
+            return
+        if self._suffix_base_names is None:
+            self._suffix_base_names = self._snapshot_stems()
+        idx = self._suffix_index_var.get() % len(self._suffix_list)
+        suffix = self._suffix_list[idx]
+        self._fn_interlace_start_var.set(self._suffix_base_names["interlace_start"] + suffix + ".tif")
+        self._fn_main_start_var.set(self._suffix_base_names["main_start"] + suffix + ".tif")
+        self._fn_interlace_stop_var.set(self._suffix_base_names["interlace_stop"] + suffix + ".tif")
+        self._fn_main_stop_var.set(self._suffix_base_names["main_stop"] + suffix + ".tif")
+
+    def _advance_suffix_index(self) -> None:
+        if not self._suffix_list or not self._suffix_autofill_var.get():
+            return
+        idx = (self._suffix_index_var.get() + 1) % len(self._suffix_list)
+        self._suffix_index_var.set(idx)
 
     def _autocal_browse_dir(self) -> None:
         chosen = filedialog.askdirectory(
