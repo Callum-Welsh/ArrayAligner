@@ -1541,11 +1541,13 @@ class GaussianFitApp(tk.Tk):
         if self._suffix_base_names is None:
             self._suffix_base_names = self._snapshot_stems()
         idx = self._suffix_index_var.get() % len(self._suffix_list)
-        suffix = self._suffix_list[idx]
-        self._fn_interlace_start_var.set(self._suffix_base_names["interlace_start"] + suffix + ".tif")
-        self._fn_main_start_var.set(self._suffix_base_names["main_start"] + suffix + ".tif")
-        self._fn_interlace_stop_var.set(self._suffix_base_names["interlace_stop"] + suffix + ".tif")
-        self._fn_main_stop_var.set(self._suffix_base_names["main_stop"] + suffix + ".tif")
+        next_idx = (self._suffix_index_var.get()+1) % len(self._suffix_list)
+        suffix_stop = self._suffix_list[idx]
+        suffix_start = self._suffix_list[next_idx]
+        self._fn_interlace_start_var.set(self._suffix_base_names["interlace_stop"] + suffix_stop + ".tif")
+        self._fn_main_start_var.set(self._suffix_base_names["main_stop"] + suffix_stop + ".tif")
+        self._fn_interlace_stop_var.set(self._suffix_base_names["interlace_start"] + suffix_start + ".tif")
+        self._fn_main_stop_var.set(self._suffix_base_names["main_start"] + suffix_start + ".tif")
 
     def _advance_suffix_index(self) -> None:
         if not self._suffix_list or not self._suffix_autofill_var.get():
